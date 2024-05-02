@@ -1318,8 +1318,9 @@ func (cf *changeFrontier) runBillingMetricReporting(ctx context.Context) {
 
 	for {
 		t.Reset(changefeedbase.BillingMetricsReportingInterval.Get(&cf.flowCtx.Cfg.Settings.SV))
+		var start time.Time
 		select {
-		case <-t.C:
+		case start = <-t.C:
 			t.Read = true
 		case <-ctx.Done():
 			return
@@ -1337,6 +1338,8 @@ func (cf *changeFrontier) runBillingMetricReporting(ctx context.Context) {
 			continue
 		}
 		cf.perFeedSliMetrics.TableBytes.Update(res)
+		cf.perFeedSliMetrics.BillingUpdatedAt.Update(start.UnixNano())
+		cf.perFeedSliMetrics.BillingQueryDuration.RecordValue(timeutil.Since(start).Nanoseconds())
 	}
 }
 

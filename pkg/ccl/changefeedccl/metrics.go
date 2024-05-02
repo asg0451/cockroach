@@ -339,8 +339,10 @@ func (m *sliMetrics) recordSizeBasedFlush() {
 // by job_id.
 // TODO: job_id will never change, right?
 type PerFeedAggMetrics struct {
-	TableBytes        *aggmetric.AggGauge
-	BillingErrorCount *aggmetric.AggCounter
+	TableBytes           *aggmetric.AggGauge
+	BillingErrorCount    *aggmetric.AggCounter
+	BillingUpdatedAt     *aggmetric.AggGauge
+	BillingQueryDuration *aggmetric.AggHistogram
 
 	m struct {
 		syncutil.Mutex
@@ -358,8 +360,10 @@ func (a *PerFeedAggMetrics) getOrCreateSLIMetrics(jobID catpb.JobID) *perFeedSli
 	}
 	idStr := strconv.FormatInt(int64(jobID), 10)
 	m := &perFeedSliMetrics{
-		TableBytes:        a.TableBytes.AddChild(idStr),
-		BillingErrorCount: a.BillingErrorCount.AddChild(idStr),
+		TableBytes:           a.TableBytes.AddChild(idStr),
+		BillingErrorCount:    a.BillingErrorCount.AddChild(idStr),
+		BillingUpdatedAt:     a.BillingUpdatedAt.AddChild(idStr),
+		BillingQueryDuration: a.BillingQueryDuration.AddChild(idStr),
 	}
 	a.m.metrics[jobID] = m
 	return m
@@ -371,19 +375,36 @@ func (a *PerFeedAggMetrics) closeSliMetrics(jobID catpb.JobID) {
 	delete(a.m.metrics, jobID)
 }
 
-func newPerFeedAggMetrics(_ time.Duration) *PerFeedAggMetrics {
+func newPerFeedAggMetrics(histogramWindow time.Duration) *PerFeedAggMetrics {
 	b := aggmetric.MakeBuilder("job_id")
 	m := &PerFeedAggMetrics{
 		TableBytes:        b.Gauge(metaChangefeedTableBytes),
 		BillingErrorCount: b.Counter(metaChangefeedBillingErrorCount),
+		BillingUpdatedAt: b.FunctionalGauge(metaChangefeedBillingUpdatedAt, func(cvs []int64) int64 {
+			min := int64(0)
+			for _, cv := range cvs {
+				if cv < min {
+					min = cv
+				}
+			}
+			return min
+		}),
+		BillingQueryDuration: b.Histogram(metric.HistogramOptions{
+			Metadata:     metaChangefeedBillingQueryDuration,
+			Duration:     histogramWindow,
+			BucketConfig: metric.LongRunning60mLatencyBuckets,
+			Mode:         metric.HistogramModePrometheus,
+		}),
 	}
 	m.m.metrics = make(map[catpb.JobID]*perFeedSliMetrics)
 	return m
 }
 
 type perFeedSliMetrics struct {
-	TableBytes        *aggmetric.Gauge
-	BillingErrorCount *aggmetric.Counter
+	TableBytes           *aggmetric.Gauge
+	BillingErrorCount    *aggmetric.Counter
+	BillingUpdatedAt     *aggmetric.Gauge
+	BillingQueryDuration *aggmetric.Histogram
 }
 
 type kafkaHistogramAdapter struct {
@@ -691,16 +712,28 @@ var (
 		Unit:        metric.Unit_COUNT,
 	}
 	metaChangefeedTableBytes = metric.Metadata{
-		Name:        "changefeed.table_bytes",
+		Name:        "changefeed.billing.table_bytes",
 		Help:        "Aggregated number of bytes of data per table",
 		Measurement: "Storage",
 		Unit:        metric.Unit_BYTES,
 	}
 	metaChangefeedBillingErrorCount = metric.Metadata{
-		Name:        "changefeed.billing_error_count",
+		Name:        "changefeed.billing.error_count",
 		Help:        "Count of errors generating billing metrics for changefeeds",
 		Measurement: "Errors",
 		Unit:        metric.Unit_COUNT,
+	}
+	metaChangefeedBillingUpdatedAt = metric.Metadata{
+		Name:        "changefeed.billing.updated_at",
+		Help:        "Time (epoch ns) of the last update to the billing metrics for changefeeds",
+		Measurement: "Nanoseconds",
+		Unit:        metric.Unit_NANOSECONDS,
+	}
+	metaChangefeedBillingQueryDuration = metric.Metadata{
+		Name:        "changefeed.billing.query_duration",
+		Help:        "Time taken by the queries to generate billing metrics for changefeeds",
+		Measurement: "Nanoseconds",
+		Unit:        metric.Unit_NANOSECONDS,
 	}
 )
 
