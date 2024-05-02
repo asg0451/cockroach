@@ -1328,9 +1328,10 @@ func (cf *changeFrontier) runBillingMetricReporting(ctx context.Context) {
 			return
 		}
 
-		// TODO: timing metric? updated_at metric?
 		// updated_at is not super useful because paused feeds will look the same as broken ones
-		// cf.flowCtx.EvalCtx.JobExecContext.(sql.JobExecContext)
+		// but if we drop the paused requirement it becomes useful. and also if we cant find a way
+		// to emit a 0 on termination then uhhhhh
+		// TODO: that
 		res, err := FetchChangefeedBillingBytes(ctx, cf.flowCtx.Cfg.DB, cf.flowCtx.Cfg.ExecutorConfig.(*sql.ExecutorConfig))
 		if err != nil {
 			log.Warningf(ctx, "failed to fetch billing bytes: %v", err)
