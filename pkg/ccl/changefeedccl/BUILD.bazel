@@ -198,6 +198,7 @@ go_test(
         "encoder_json_test.go",
         "encoder_test.go",
         "event_processing_test.go",
+        "fetch_table_bytes_test.go",
         "helpers_test.go",
         "main_test.go",
         "name_test.go",
