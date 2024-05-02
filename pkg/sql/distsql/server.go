@@ -362,7 +362,6 @@ func (ds *ServerImpl) setupFlow(
 			IndexUsageStatsController: ds.ServerConfig.IndexUsageStatsController,
 			RangeStatsFetcher:         ds.ServerConfig.RangeStatsFetcher,
 			ULIDEntropy:               ulid.Monotonic(crypto_rand.Reader, 0),
-			JobExecContext:            interface{}(nil),
 		}
 		rng, _ := randutil.NewPseudoRand()
 		evalCtx.RNG = rng
