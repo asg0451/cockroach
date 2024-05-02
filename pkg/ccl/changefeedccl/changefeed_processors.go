@@ -972,7 +972,8 @@ type changeFrontier struct {
 
 	knobs TestingKnobs
 
-	wg sync.WaitGroup
+	wg      sync.WaitGroup
+	wgClose chan struct{}
 }
 
 const (
@@ -1124,6 +1125,7 @@ func newChangeFrontierProcessor(
 		memAcc:   memMonitor.MakeBoundAccount(),
 		input:    input,
 		frontier: sf,
+		wgClose:  make(chan struct{}),
 	}
 
 	if cfKnobs, ok := flowCtx.TestingKnobs().Changefeed.(*TestingKnobs); ok {
@@ -1321,11 +1323,14 @@ func (cf *changeFrontier) runBillingMetricReporting(ctx context.Context) {
 			t.Read = true
 		case <-ctx.Done():
 			return
+		case <-cf.wgClose:
+			return
 		}
 
 		// TODO: timing metric? updated_at metric?
 		// updated_at is not super useful because paused feeds will look the same as broken ones
-		res, err := FetchChangefeedBillingBytes(ctx, cf.flowCtx.EvalCtx.JobExecContext.(sql.JobExecContext))
+		// cf.flowCtx.EvalCtx.JobExecContext.(sql.JobExecContext)
+		res, err := FetchChangefeedBillingBytes(ctx, cf.flowCtx.Cfg.DB, cf.flowCtx.Cfg.ExecutorConfig.(*sql.ExecutorConfig))
 		if err != nil {
 			log.Warningf(ctx, "failed to fetch billing bytes: %v", err)
 			cf.perFeedSliMetrics.BillingErrorCount.Inc(1)
@@ -1337,6 +1342,7 @@ func (cf *changeFrontier) runBillingMetricReporting(ctx context.Context) {
 
 func (cf *changeFrontier) close() {
 	if cf.InternalClose() {
+		close(cf.wgClose)
 		if cf.metrics != nil {
 			cf.closeMetrics()
 		}
@@ -1346,6 +1352,7 @@ func (cf *changeFrontier) close() {
 		}
 		cf.memAcc.Close(cf.Ctx())
 		cf.MemMonitor.Stop(cf.Ctx())
+		cf.wg.Wait()
 	}
 }
 

@@ -337,6 +337,7 @@ func (m *sliMetrics) recordSizeBasedFlush() {
 
 // PerFeedAggMetrics are aggregated metrics keeping track of per-changefeed stats
 // by job_id.
+// TODO: job_id will never change, right?
 type PerFeedAggMetrics struct {
 	TableBytes        *aggmetric.AggGauge
 	BillingErrorCount *aggmetric.AggCounter

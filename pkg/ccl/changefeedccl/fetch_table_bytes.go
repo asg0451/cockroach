@@ -16,11 +16,15 @@ import (
 	"github.com/cockroachdb/errors"
 )
 
+type txner interface {
+	Txn(ctx context.Context, f func(context.Context, isql.Txn) error, opts ...isql.TxnOption) error
+}
+
 // FetchChangefeedBillingBytes fetches the total number of bytes of data watched
 // by all changefeeds. It counts tables that are watched by multiple changefeeds
 // multiple times.
-func FetchChangefeedBillingBytes(ctx context.Context, execCtx sql.JobExecContext) (int64, error) {
-	deets, err := getChangefeedDetails(ctx, execCtx)
+func FetchChangefeedBillingBytes(ctx context.Context, txr txner, execCfg *sql.ExecutorConfig) (int64, error) {
+	deets, err := getChangefeedDetails(ctx, txr)
 	if err != nil {
 		return 0, err
 	}
@@ -45,7 +49,7 @@ func FetchChangefeedBillingBytes(ctx context.Context, execCtx sql.JobExecContext
 		}
 	}
 
-	tableSizes, err := fetchTableSizes(ctx, execCtx, tableIDs)
+	tableSizes, err := fetchTableSizes(ctx, execCfg, tableIDs)
 	if err != nil {
 		return 0, err
 	}
@@ -59,7 +63,7 @@ func FetchChangefeedBillingBytes(ctx context.Context, execCtx sql.JobExecContext
 	return total, nil
 }
 
-func fetchTableSizes(ctx context.Context, execCtx sql.JobExecContext, tableIDs []descpb.ID) (map[descpb.ID]int64, error) {
+func fetchTableSizes(ctx context.Context, execCfg *sql.ExecutorConfig, tableIDs []descpb.ID) (map[descpb.ID]int64, error) {
 	tableSizes := make(map[descpb.ID]int64, len(tableIDs))
 
 	type spanInfo struct {
@@ -83,7 +87,7 @@ func fetchTableSizes(ctx context.Context, execCtx sql.JobExecContext, tableIDs [
 			desc = tableDesc
 			return nil
 		}
-		if err := sql.DescsTxn(ctx, execCtx.ExecCfg(), fetchTableDesc); err != nil {
+		if err := sql.DescsTxn(ctx, execCfg, fetchTableDesc); err != nil {
 			if errors.Is(err, catalog.ErrDescriptorDropped) {
 				// if the table was dropped, we can ignore it this cycle
 				continue
@@ -92,13 +96,13 @@ func fetchTableSizes(ctx context.Context, execCtx sql.JobExecContext, tableIDs [
 		}
 
 		// TODO: do we need to count the sizes of other indexes?
-		span := desc.PrimaryIndexSpan(execCtx.ExecCfg().Codec)
+		span := desc.PrimaryIndexSpan(execCfg.Codec)
 		spans = append(spans, span)
 		spanSizes[span.String()] = spanInfo{span: span, table: id}
 	}
 
 	// fetch span stats and fill in table sizes
-	resp, err := execCtx.ExecCfg().TenantStatusServer.SpanStats(
+	resp, err := execCfg.TenantStatusServer.SpanStats(
 		ctx,
 		&roachpb.SpanStatsRequest{
 			NodeID: "0", // fan out
@@ -124,9 +128,9 @@ const changefeedDetailsQuery = `
 `
 
 // getChangefeedDetails fetches the changefeed details for all changefeeds.
-func getChangefeedDetails(ctx context.Context, execCtx sql.JobExecContext) ([]*jobspb.ChangefeedDetails, error) {
+func getChangefeedDetails(ctx context.Context, txr txner) ([]*jobspb.ChangefeedDetails, error) {
 	var deets []*jobspb.ChangefeedDetails
-	err := execCtx.ExecCfg().InternalDB.Txn(ctx, func(ctx context.Context, txn isql.Txn) error {
+	err := txr.Txn(ctx, func(ctx context.Context, txn isql.Txn) error {
 		it, err := txn.QueryIteratorEx(ctx, "changefeeds_billing_payloads", txn.KV(), sessiondata.NodeUserSessionDataOverride, changefeedDetailsQuery)
 		if err != nil {
 			return err
