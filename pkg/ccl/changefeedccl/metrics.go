@@ -338,7 +338,8 @@ func (m *sliMetrics) recordSizeBasedFlush() {
 // PerFeedAggMetrics are aggregated metrics keeping track of per-changefeed stats
 // by job_id.
 type PerFeedAggMetrics struct {
-	TableBytes *aggmetric.AggGauge
+	TableBytes        *aggmetric.AggGauge
+	BillingErrorCount *aggmetric.AggCounter
 
 	m struct {
 		syncutil.Mutex
@@ -354,8 +355,10 @@ func (a *PerFeedAggMetrics) getOrCreateSLIMetrics(jobID catpb.JobID) *perFeedSli
 	if m, ok := a.m.metrics[jobID]; ok {
 		return m
 	}
+	idStr := strconv.FormatInt(int64(jobID), 10)
 	m := &perFeedSliMetrics{
-		TableBytes: a.TableBytes.AddChild(strconv.FormatInt(int64(jobID), 10)),
+		TableBytes:        a.TableBytes.AddChild(idStr),
+		BillingErrorCount: a.BillingErrorCount.AddChild(idStr),
 	}
 	a.m.metrics[jobID] = m
 	return m
@@ -370,14 +373,16 @@ func (a *PerFeedAggMetrics) closeSliMetrics(jobID catpb.JobID) {
 func newPerFeedAggMetrics(_ time.Duration) *PerFeedAggMetrics {
 	b := aggmetric.MakeBuilder("job_id")
 	m := &PerFeedAggMetrics{
-		TableBytes: b.Gauge(metaChangefeedTableBytes),
+		TableBytes:        b.Gauge(metaChangefeedTableBytes),
+		BillingErrorCount: b.Counter(metaChangefeedBillingErrorCount),
 	}
 	m.m.metrics = make(map[catpb.JobID]*perFeedSliMetrics)
 	return m
 }
 
 type perFeedSliMetrics struct {
-	TableBytes *aggmetric.Gauge
+	TableBytes        *aggmetric.Gauge
+	BillingErrorCount *aggmetric.Counter
 }
 
 type kafkaHistogramAdapter struct {
@@ -689,6 +694,12 @@ var (
 		Help:        "Aggregated number of bytes of data per table",
 		Measurement: "Storage",
 		Unit:        metric.Unit_BYTES,
+	}
+	metaChangefeedBillingErrorCount = metric.Metadata{
+		Name:        "changefeed.billing_error_count",
+		Help:        "Count of errors generating billing metrics for changefeeds",
+		Measurement: "Errors",
+		Unit:        metric.Unit_COUNT,
 	}
 )
 
