@@ -1106,7 +1106,7 @@ func (b *changefeedResumer) setJobRunningStatus(
 
 // Resume is part of the jobs.Resumer interface.
 func (b *changefeedResumer) Resume(ctx context.Context, execCtx interface{}) error {
-	jobExec := execCtx.(sql.JobExecContext)
+	jobExec := execCtx.(sql.JobExecContext) // HERE
 	execCfg := jobExec.ExecCfg()
 	jobID := b.job.ID()
 	details := b.job.Details().(jobspb.ChangefeedDetails)
@@ -1291,6 +1291,7 @@ func (b *changefeedResumer) resumeWithRetries(
 			}
 		}
 
+		// HERE? prob not
 		// Terminate changefeed if needed.
 		if err := changefeedbase.AsTerminalError(ctx, jobExec.ExecCfg().LeaseManager, flowErr); err != nil {
 			log.Infof(ctx, "CHANGEFEED %d shutting down (cause: %v)", jobID, err)

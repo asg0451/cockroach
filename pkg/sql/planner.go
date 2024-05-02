@@ -440,7 +440,7 @@ func newInternalPlanner(
 		sessionDataMutatorCallbacks: sessionDataMutatorCallbacks{},
 	}
 
-	p.extendedEvalCtx = internalExtendedEvalCtx(ctx, sds, params.collection, txn, ts, ts, execCfg)
+	p.extendedEvalCtx = internalExtendedEvalCtx(ctx, sds, params.collection, txn, ts, ts, execCfg, p)
 	p.extendedEvalCtx.Planner = p
 	p.extendedEvalCtx.StreamManagerFactory = p
 	p.extendedEvalCtx.PrivilegedAccessor = p
@@ -509,6 +509,7 @@ func internalExtendedEvalCtx(
 	txnTimestamp time.Time,
 	stmtTimestamp time.Time,
 	execCfg *ExecutorConfig,
+	p JobExecContext,
 ) extendedEvalContext {
 	evalContextTestingKnobs := execCfg.EvalContextTestingKnobs
 
@@ -554,6 +555,7 @@ func internalExtendedEvalCtx(
 			StmtDiagnosticsRequestInserter: execCfg.StmtDiagnosticsRecorder.InsertRequest,
 			RangeStatsFetcher:              execCfg.RangeStatsFetcher,
 			ULIDEntropy:                    ulid.Monotonic(crypto_rand.Reader, 0),
+			JobExecContext:                 p, // i'm pretty sure this is wrong but idk why
 		},
 		Tracing:         &SessionTracing{},
 		Descs:           tables,
