@@ -307,7 +307,7 @@ var BillingMetricsReportingInterval = settings.RegisterDurationSetting(
 	settings.ApplicationLevel,
 	"changefeed.billing.interval",
 	"the interval at which the changefeed calculates and updates its billing metric",
-	5*time.Minute,
+	1*time.Second, // FOR DEBUGGING // 5*time.Minute,
 	settings.PositiveDuration,
 )
 
