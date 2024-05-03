@@ -369,12 +369,6 @@ func (a *PerFeedAggMetrics) getOrCreateSLIMetrics(jobID catpb.JobID) *perFeedSli
 	return m
 }
 
-func (a *PerFeedAggMetrics) closeSliMetrics(jobID catpb.JobID) {
-	a.m.Lock()
-	defer a.m.Unlock()
-	delete(a.m.metrics, jobID)
-}
-
 func newPerFeedAggMetrics(histogramWindow time.Duration) *PerFeedAggMetrics {
 	b := aggmetric.MakeBuilder("job_id")
 	m := &PerFeedAggMetrics{

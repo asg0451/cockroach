@@ -1376,7 +1376,6 @@ func (cf *changeFrontier) closeMetrics() {
 	}()
 
 	cf.sliMetrics.closeId(cf.sliMetricsID)
-	cf.metrics.PerFeedAggMetrics.closeSliMetrics(cf.spec.JobID) // TODO: clean up
 }
 
 // Next is part of the RowSource interface.
