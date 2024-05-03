@@ -1339,7 +1339,9 @@ func (cf *changeFrontier) runBillingMetricReporting(ctx context.Context) {
 			continue
 		}
 		cf.perFeedSliMetrics.TableBytes.Update(res)
-		cf.perFeedSliMetrics.BillingUpdatedAt.Update(start.UnixNano())
+		// TODO: FunctionalGauge children dont work right. maybe have to be AddFunctionalChild and keep track of stuff manually
+		// in which case what's the point?
+		// cf.perFeedSliMetrics.BillingUpdatedAt.Update(start.UnixNano())
 		cf.perFeedSliMetrics.BillingQueryDuration.RecordValue(timeutil.Since(start).Nanoseconds())
 	}
 }
