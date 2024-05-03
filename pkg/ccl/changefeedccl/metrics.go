@@ -369,6 +369,8 @@ func (a *PerFeedAggMetrics) getOrCreateSLIMetrics(jobID catpb.JobID) *perFeedSli
 	return m
 }
 
+var HackPerFeedAggMetrics *PerFeedAggMetrics = nil
+
 func newPerFeedAggMetrics(histogramWindow time.Duration) *PerFeedAggMetrics {
 	b := aggmetric.MakeBuilder("job_id")
 	m := &PerFeedAggMetrics{
@@ -391,9 +393,14 @@ func newPerFeedAggMetrics(histogramWindow time.Duration) *PerFeedAggMetrics {
 		}),
 	}
 	m.m.metrics = make(map[catpb.JobID]*perFeedSliMetrics)
+
+	// TODO: implement this properly.
+	HackPerFeedAggMetrics = m
+
 	return m
 }
 
+// TODO: a method on these to increment stuff while bumping updated_at
 type perFeedSliMetrics struct {
 	TableBytes           *aggmetric.Gauge
 	BillingErrorCount    *aggmetric.Counter

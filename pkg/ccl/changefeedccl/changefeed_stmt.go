@@ -1426,7 +1426,7 @@ func reconcileJobStateWithLocalState(
 	return nil
 }
 
-// OnFailOrCancel is part of the jobs.Resumer interface.
+// OnFailOrCancel is part of the jobs.Resumer interface. // maybe HERE?
 func (b *changefeedResumer) OnFailOrCancel(
 	ctx context.Context, jobExec interface{}, _ error,
 ) error {
@@ -1439,6 +1439,15 @@ func (b *changefeedResumer) OnFailOrCancel(
 		execCfg.ProtectedTimestampProvider,
 		progress.GetChangefeed().ProtectedTimestampRecord,
 	)
+
+	// billing: set the job to bill zero bytes
+	func() {
+		HackPerFeedAggMetrics.m.Lock()
+		defer HackPerFeedAggMetrics.m.Unlock()
+		slime := HackPerFeedAggMetrics.getOrCreateSLIMetrics(b.job.ID())
+		slime.TableBytes.Update(0)
+		// slime.BillingUpdatedAt.Update(timeutil.Now().UnixNano()) // TODO: fix this metric
+	}()
 
 	// If this job has failed (not canceled), increment the counter.
 	if jobs.HasErrJobCanceled(

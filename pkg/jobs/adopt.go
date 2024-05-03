@@ -203,7 +203,7 @@ func (r *Registry) processClaimedJobs(ctx context.Context, s sqlliveness.Session
 func (r *Registry) resumeClaimedJobs(
 	ctx context.Context, s sqlliveness.Session, claimedToResume map[jobspb.JobID]struct{},
 ) {
-	const resumeConcurrency = 64
+	const resumeConcurrency = 1
 	sem := make(chan struct{}, resumeConcurrency)
 	var wg sync.WaitGroup
 	add := func() { sem <- struct{}{}; wg.Add(1) }
