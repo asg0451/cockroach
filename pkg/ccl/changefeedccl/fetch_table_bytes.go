@@ -3,6 +3,7 @@ package changefeedccl
 import (
 	"context"
 
+	"github.com/cockroachdb/cockroach/pkg/ccl/utilccl"
 	"github.com/cockroachdb/cockroach/pkg/jobs"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
@@ -11,20 +12,29 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descs"
 	"github.com/cockroachdb/cockroach/pkg/sql/isql"
+	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
+	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/eval"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/volatility"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
+	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/errors"
 )
 
-type txner interface {
-	Txn(ctx context.Context, f func(context.Context, isql.Txn) error, opts ...isql.TxnOption) error
+// type txner interface {
+// 	Txn(ctx context.Context, f func(context.Context, isql.Txn) error, opts ...isql.TxnOption) error
+// }
+
+type querier interface {
+	QueryIteratorEx(ctx context.Context, opName string, override sessiondata.InternalExecutorOverride, stmt string, qargs ...interface{}) (eval.InternalRows, error)
 }
 
 // FetchChangefeedBillingBytes fetches the total number of bytes of data watched
 // by all changefeeds. It counts tables that are watched by multiple changefeeds
 // multiple times.
-func FetchChangefeedBillingBytes(ctx context.Context, txr txner, execCfg *sql.ExecutorConfig) (int64, error) {
-	deets, err := getChangefeedDetails(ctx, txr)
+func FetchChangefeedBillingBytes(ctx context.Context, querier querier, execCfg *sql.ExecutorConfig) (int64, error) {
+	deets, err := getChangefeedDetails(ctx, querier)
 	if err != nil {
 		return 0, err
 	}
@@ -128,36 +138,56 @@ const changefeedDetailsQuery = `
 `
 
 // getChangefeedDetails fetches the changefeed details for all changefeeds.
-func getChangefeedDetails(ctx context.Context, txr txner) ([]*jobspb.ChangefeedDetails, error) {
+func getChangefeedDetails(ctx context.Context, querier querier) ([]*jobspb.ChangefeedDetails, error) {
 	var deets []*jobspb.ChangefeedDetails
-	err := txr.Txn(ctx, func(ctx context.Context, txn isql.Txn) error {
-		it, err := txn.QueryIteratorEx(ctx, "changefeeds_billing_payloads", txn.KV(), sessiondata.NodeUserSessionDataOverride, changefeedDetailsQuery)
-		if err != nil {
-			return err
-		}
-		defer func() { _ = it.Close() }()
 
-		var ok bool
-		for ok, err = it.Next(ctx); ok; ok, err = it.Next(ctx) {
-			row := it.Cur()
-			id, payloadBs := int64(tree.MustBeDInt(row[0])), tree.MustBeDBytes(row[1])
-			var payload jobspb.Payload
-			if err := payload.Unmarshal([]byte(payloadBs)); err != nil {
-				return errors.WithDetailf(err, "failed to unmarshal payload for job %d", id)
-			}
+	it, err := querier.QueryIteratorEx(ctx, "changefeeds_billing_payloads", sessiondata.NodeUserSessionDataOverride, changefeedDetailsQuery)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = it.Close() }()
 
-			details := payload.GetDetails()
-			if details == nil {
-				return errors.AssertionFailedf("no details for job %d", id)
-			}
-			cfDetails, ok := details.(*jobspb.Payload_Changefeed)
-			if !ok {
-				return errors.AssertionFailedf("unexpected details type %T for job %d", details, id)
-			}
-			deets = append(deets, cfDetails.Changefeed)
+	var ok bool
+	for ok, err = it.Next(ctx); ok; ok, err = it.Next(ctx) {
+		row := it.Cur()
+		id, payloadBs := int64(tree.MustBeDInt(row[0])), tree.MustBeDBytes(row[1])
+		var payload jobspb.Payload
+		if err := payload.Unmarshal([]byte(payloadBs)); err != nil {
+			return nil, errors.WithDetailf(err, "failed to unmarshal payload for job %d", id)
 		}
-		return err
-	})
+
+		details := payload.GetDetails()
+		if details == nil {
+			return nil, errors.AssertionFailedf("no details for job %d", id)
+		}
+		cfDetails, ok := details.(*jobspb.Payload_Changefeed)
+		if !ok {
+			return nil, errors.AssertionFailedf("unexpected details type %T for job %d", details, id)
+		}
+		deets = append(deets, cfDetails.Changefeed)
+	}
 
 	return deets, err
+}
+
+// Setup the sql builtin. This is used for either one-off validation or for
+// metrics collection itelf, depending on which approach we go with.
+func init() {
+	overload := tree.Overload{
+		Types:      tree.ParamTypes{},
+		ReturnType: tree.FixedReturnType(types.Int),
+		Fn: func(ctx context.Context, evalCtx *eval.Context, args tree.Datums) (tree.Datum, error) {
+			sum, err := FetchChangefeedBillingBytes(ctx, evalCtx.Planner, evalCtx.Planner.ExecutorConfig().(*sql.ExecutorConfig))
+			if err != nil {
+				return nil, pgerror.Wrap(err, pgcode.Internal, ``)
+			}
+			return tree.NewDInt(tree.DInt(sum)), nil
+		},
+		Class:      tree.NormalClass,
+		Info:       "TODO",
+		Volatility: volatility.Volatile,
+	}
+
+	utilccl.RegisterCCLBuiltin("crdb_internal.changefeed_table_bytes",
+		`Returns the sum of bytes watched per table per changefeed`, overload)
 }

@@ -33,7 +33,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/eval"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/log/logcrash"
@@ -1312,6 +1314,14 @@ func (cf *changeFrontier) Start(ctx context.Context) {
 	}()
 }
 
+// TODO: do this in a less silly way. the complication comes from calling the
+// function both from a sql statement and from the changefeed frontier.
+type queryFn func(ctx context.Context, opName string, override sessiondata.InternalExecutorOverride, stmt string, qargs ...interface{}) (eval.InternalRows, error)
+
+func (f queryFn) QueryIteratorEx(ctx context.Context, opName string, override sessiondata.InternalExecutorOverride, stmt string, qargs ...interface{}) (eval.InternalRows, error) {
+	return f(ctx, opName, override, stmt, qargs...)
+}
+
 func (cf *changeFrontier) runBillingMetricReporting(ctx context.Context) {
 	var t timeutil.Timer
 	defer t.Stop()
@@ -1328,9 +1338,13 @@ func (cf *changeFrontier) runBillingMetricReporting(ctx context.Context) {
 			return
 		}
 
+		var querier queryFn = func(ctx context.Context, opName string, override sessiondata.InternalExecutorOverride, stmt string, qargs ...interface{}) (eval.InternalRows, error) {
+			return cf.flowCtx.Cfg.DB.Executor().QueryIteratorEx(ctx, opName, cf.flowCtx.Txn, override, stmt, qargs...)
+		}
+
 		// UpdatedAt is not super useful because paused feeds will look the same as broken ones
 		// but if we drop the paused requirement it becomes useful.
-		res, err := FetchChangefeedBillingBytes(ctx, cf.flowCtx.Cfg.DB, cf.flowCtx.Cfg.ExecutorConfig.(*sql.ExecutorConfig))
+		res, err := FetchChangefeedBillingBytes(ctx, querier, cf.flowCtx.Cfg.ExecutorConfig.(*sql.ExecutorConfig))
 		if err != nil {
 			log.Warningf(ctx, "failed to fetch billing bytes: %v", err)
 			cf.perFeedSliMetrics.BillingErrorCount.Inc(1)
