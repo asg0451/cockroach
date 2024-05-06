@@ -13,10 +13,11 @@ import (
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
-	_ "github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl" // register ccl hooks
-	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/billingjob"
+	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl"
 	"github.com/cockroachdb/cockroach/pkg/security/username"
 	"github.com/cockroachdb/cockroach/pkg/sql"
+	"github.com/cockroachdb/cockroach/pkg/sql/isql"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/eval"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
@@ -24,6 +25,14 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// TODO: do this in a less silly way. the complication comes from calling the
+// function both from a sql statement and from the changefeed frontier.
+type queryFn func(ctx context.Context, opName string, override sessiondata.InternalExecutorOverride, stmt string, qargs ...interface{}) (eval.InternalRows, error)
+
+func (f queryFn) QueryIteratorEx(ctx context.Context, opName string, override sessiondata.InternalExecutorOverride, stmt string, qargs ...interface{}) (eval.InternalRows, error) {
+	return f(ctx, opName, override, stmt, qargs...)
+}
 
 func TestFetchChangefeedBillingBytes(t *testing.T) {
 	defer leaktest.AfterTest(t)()
@@ -60,7 +69,17 @@ func TestFetchChangefeedBillingBytes(t *testing.T) {
 	_, err = ie.ExecEx(ctx, "test-create-cf", nil, sessiondata.InternalExecutorOverride{User: username.NodeUserName()}, stmt)
 	require.NoError(t, err)
 
-	res, err := billingjob.FetchChangefeedBillingBytes(ctx, execCtx)
+	var querier queryFn = func(ctx context.Context, opName string, override sessiondata.InternalExecutorOverride, stmt string, qargs ...interface{}) (eval.InternalRows, error) {
+		var it eval.InternalRows
+		var err error
+		err = execCtx.ExecCfg().InternalDB.Txn(ctx, func(ctx context.Context, txn isql.Txn) error {
+			it, err = txn.QueryIteratorEx(ctx, opName, txn.KV(), override, stmt, qargs...)
+			return err
+		})
+		return it, err
+	}
+
+	res, err := changefeedccl.FetchChangefeedBillingBytes(ctx, querier, &execCfg)
 	require.NoError(t, err)
 	assert.NotZero(t, res)
 }
