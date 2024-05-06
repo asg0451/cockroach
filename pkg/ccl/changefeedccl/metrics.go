@@ -362,14 +362,15 @@ func (a *PerFeedAggMetrics) getOrCreateSLIMetrics(jobID catpb.JobID) *perFeedSli
 	m := &perFeedSliMetrics{
 		TableBytes:           a.TableBytes.AddChild(idStr),
 		BillingErrorCount:    a.BillingErrorCount.AddChild(idStr),
-		BillingUpdatedAt:     a.BillingUpdatedAt.AddChild(idStr),
 		BillingQueryDuration: a.BillingQueryDuration.AddChild(idStr),
 	}
+	m.BillingUpdatedAt = a.BillingUpdatedAt.AddFunctionalChild(func() int64 {
+		return m.billingUpdatedAtVal.Load()
+	}, idStr)
+
 	a.m.metrics[jobID] = m
 	return m
 }
-
-var HackPerFeedAggMetrics *PerFeedAggMetrics = nil
 
 func newPerFeedAggMetrics(histogramWindow time.Duration) *PerFeedAggMetrics {
 	b := aggmetric.MakeBuilder("job_id")
@@ -394,9 +395,6 @@ func newPerFeedAggMetrics(histogramWindow time.Duration) *PerFeedAggMetrics {
 	}
 	m.m.metrics = make(map[catpb.JobID]*perFeedSliMetrics)
 
-	// TODO: implement this properly.
-	HackPerFeedAggMetrics = m
-
 	return m
 }
 
@@ -404,8 +402,12 @@ func newPerFeedAggMetrics(histogramWindow time.Duration) *PerFeedAggMetrics {
 type perFeedSliMetrics struct {
 	TableBytes           *aggmetric.Gauge
 	BillingErrorCount    *aggmetric.Counter
-	BillingUpdatedAt     *aggmetric.Gauge
 	BillingQueryDuration *aggmetric.Histogram
+
+	// NOTE: this is a functional gauge, so you may not call Update() on it.
+	// instead, use billingUpdatedAtVal
+	BillingUpdatedAt    *aggmetric.Gauge
+	billingUpdatedAtVal atomic.Int64
 }
 
 type kafkaHistogramAdapter struct {

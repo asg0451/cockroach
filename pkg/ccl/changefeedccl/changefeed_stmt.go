@@ -1442,11 +1442,9 @@ func (b *changefeedResumer) OnFailOrCancel(
 
 	// billing: set the job to bill zero bytes
 	func() {
-		HackPerFeedAggMetrics.m.Lock()
-		defer HackPerFeedAggMetrics.m.Unlock()
-		slime := HackPerFeedAggMetrics.getOrCreateSLIMetrics(b.job.ID())
+		slime := execCfg.JobRegistry.MetricsStruct().Changefeed.(*Metrics).PerFeedAggMetrics.getOrCreateSLIMetrics(b.job.ID())
 		slime.TableBytes.Update(0)
-		// slime.BillingUpdatedAt.Update(timeutil.Now().UnixNano()) // TODO: fix this metric
+		slime.billingUpdatedAtVal.Store(timeutil.Now().UnixNano())
 	}()
 
 	// If this job has failed (not canceled), increment the counter.

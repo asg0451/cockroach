@@ -1328,10 +1328,8 @@ func (cf *changeFrontier) runBillingMetricReporting(ctx context.Context) {
 			return
 		}
 
-		// updated_at is not super useful because paused feeds will look the same as broken ones
-		// but if we drop the paused requirement it becomes useful. and also if we cant find a way
-		// to emit a 0 on termination then uhhhhh
-		// TODO: that
+		// UpdatedAt is not super useful because paused feeds will look the same as broken ones
+		// but if we drop the paused requirement it becomes useful.
 		res, err := FetchChangefeedBillingBytes(ctx, cf.flowCtx.Cfg.DB, cf.flowCtx.Cfg.ExecutorConfig.(*sql.ExecutorConfig))
 		if err != nil {
 			log.Warningf(ctx, "failed to fetch billing bytes: %v", err)
@@ -1339,9 +1337,7 @@ func (cf *changeFrontier) runBillingMetricReporting(ctx context.Context) {
 			continue
 		}
 		cf.perFeedSliMetrics.TableBytes.Update(res)
-		// TODO: FunctionalGauge children dont work right. maybe have to be AddFunctionalChild and keep track of stuff manually
-		// in which case what's the point?
-		// cf.perFeedSliMetrics.BillingUpdatedAt.Update(start.UnixNano())
+		cf.perFeedSliMetrics.billingUpdatedAtVal.Store(start.UnixNano())
 		cf.perFeedSliMetrics.BillingQueryDuration.RecordValue(timeutil.Since(start).Nanoseconds())
 	}
 }
