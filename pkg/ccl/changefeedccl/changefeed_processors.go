@@ -1323,6 +1323,10 @@ func (f queryFn) QueryIteratorEx(ctx context.Context, opName string, override se
 }
 
 func (cf *changeFrontier) runBillingMetricReporting(ctx context.Context) {
+	if cf.spec.JobID == 0 { // don't bill for core (non-enterprise) changefeeds
+		return
+	}
+
 	var t timeutil.Timer
 	defer t.Stop()
 
