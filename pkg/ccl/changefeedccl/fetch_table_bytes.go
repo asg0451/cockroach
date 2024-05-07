@@ -22,18 +22,14 @@ import (
 	"github.com/cockroachdb/errors"
 )
 
-// type txner interface {
-// 	Txn(ctx context.Context, f func(context.Context, isql.Txn) error, opts ...isql.TxnOption) error
-// }
-
-type querier interface {
+type TableBytesQuerier interface {
 	QueryIteratorEx(ctx context.Context, opName string, override sessiondata.InternalExecutorOverride, stmt string, qargs ...interface{}) (eval.InternalRows, error)
 }
 
 // FetchChangefeedBillingBytes fetches the total number of bytes of data watched
 // by all changefeeds. It counts tables that are watched by multiple changefeeds
 // multiple times.
-func FetchChangefeedBillingBytes(ctx context.Context, querier querier, execCfg *sql.ExecutorConfig) (int64, error) {
+func FetchChangefeedBillingBytes(ctx context.Context, querier TableBytesQuerier, execCfg *sql.ExecutorConfig) (int64, error) {
 	deets, err := getChangefeedDetails(ctx, querier)
 	if err != nil {
 		return 0, err
@@ -46,7 +42,7 @@ func FetchChangefeedBillingBytes(ctx context.Context, querier querier, execCfg *
 		// inspired by AllTargets in changefeedccl/changefeed.go
 		if len(cd.TargetSpecifications) > 0 {
 			for _, ts := range cd.TargetSpecifications {
-				if ts.TableID > 0 {
+				if ts.TableID > 0 { // i think this is just a sanity check, but TODO: do we need to do it here? what about below?
 					feedsTableIds[cdi] = append(feedsTableIds[cdi], ts.TableID)
 					tableIDs = append(tableIDs, ts.TableID)
 				}
@@ -85,19 +81,8 @@ func fetchTableSizes(ctx context.Context, execCfg *sql.ExecutorConfig, tableIDs 
 	spanSizes := make(map[string]spanInfo, len(tableIDs))
 	spans := make([]roachpb.Span, 0, len(tableIDs))
 	for _, id := range tableIDs {
-		// fetch table descriptor
-		var desc catalog.TableDescriptor
-		fetchTableDesc := func(
-			ctx context.Context, txn isql.Txn, descriptors *descs.Collection,
-		) error {
-			tableDesc, err := descriptors.ByID(txn.KV()).WithoutNonPublic().Get().Table(ctx, id)
-			if err != nil {
-				return err
-			}
-			desc = tableDesc
-			return nil
-		}
-		if err := sql.DescsTxn(ctx, execCfg, fetchTableDesc); err != nil {
+		desc, err := getTableDesc(ctx, execCfg, id)
+		if err != nil {
 			if errors.Is(err, catalog.ErrDescriptorDropped) {
 				// if the table was dropped, we can ignore it this cycle
 				continue
@@ -130,6 +115,25 @@ func fetchTableSizes(ctx context.Context, execCfg *sql.ExecutorConfig, tableIDs 
 	return tableSizes, nil
 }
 
+func getTableDesc(ctx context.Context, execCfg *sql.ExecutorConfig, tableID descpb.ID) (catalog.TableDescriptor, error) {
+	// fetch table descriptor
+	var desc catalog.TableDescriptor
+	fetchTableDesc := func(
+		ctx context.Context, txn isql.Txn, descriptors *descs.Collection,
+	) error {
+		tableDesc, err := descriptors.ByID(txn.KV()).WithoutNonPublic().Get().Table(ctx, tableID)
+		if err != nil {
+			return err
+		}
+		desc = tableDesc
+		return nil
+	}
+	if err := sql.DescsTxn(ctx, execCfg, fetchTableDesc); err != nil {
+		return nil, err
+	}
+	return desc, nil
+}
+
 const changefeedDetailsQuery = `
 	SELECT j.id, ji.value
 	FROM system.jobs j JOIN system.job_info ji ON j.id = ji.job_id
@@ -138,7 +142,7 @@ const changefeedDetailsQuery = `
 `
 
 // getChangefeedDetails fetches the changefeed details for all changefeeds.
-func getChangefeedDetails(ctx context.Context, querier querier) ([]*jobspb.ChangefeedDetails, error) {
+func getChangefeedDetails(ctx context.Context, querier TableBytesQuerier) ([]*jobspb.ChangefeedDetails, error) {
 	var deets []*jobspb.ChangefeedDetails
 
 	it, err := querier.QueryIteratorEx(ctx, "changefeeds_billing_payloads", sessiondata.NodeUserSessionDataOverride, changefeedDetailsQuery)

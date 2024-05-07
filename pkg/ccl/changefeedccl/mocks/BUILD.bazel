@@ -1,0 +1,41 @@
+load("@bazel_gomock//:gomock.bzl", "gomock")
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
+
+gomock(
+    name = "querier",
+    out = "querier.go",
+    interfaces = ["TableBytesQuerier"],
+    library = "//pkg/ccl/changefeedccl",
+    package = "mocks",
+    visibility = [
+        ":__pkg__",
+        "//pkg/gen:__pkg__",
+    ],
+)
+
+gomock(
+    name = "internal_rows",
+    out = "internal_rows.go",
+    interfaces = ["InternalRows"],
+    library = "//pkg/sql/sem/eval",
+    package = "mocks",
+    visibility = [
+        ":__pkg__",
+        "//pkg/gen:__pkg__",
+    ],
+)
+
+go_library(
+    name = "mocks",
+    srcs = [
+        "internal_rows.go",
+        "querier.go",
+    ],
+    importpath = "github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/mocks",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//pkg/sql/sem/eval",
+        "//pkg/sql/sessiondata",
+        "@com_github_golang_mock//gomock",
+    ],
+)
