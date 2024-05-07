@@ -1220,7 +1220,9 @@ func (cf *changeFrontier) Start(ctx context.Context) {
 		return
 	}
 	cf.sliMetrics = sli
-	cf.perFeedSliMetrics = cf.metrics.getPerFeedSLIMetrics(cf.spec.JobID)
+	if cf.spec.JobID != 0 {
+		cf.perFeedSliMetrics = cf.metrics.getPerFeedSLIMetrics(cf.spec.JobID)
+	}
 
 	cf.sink, err = getResolvedTimestampSink(ctx, cf.flowCtx.Cfg, cf.spec.Feed, nilOracle,
 		cf.spec.User(), cf.spec.JobID, sli)

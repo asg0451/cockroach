@@ -33,6 +33,7 @@ import (
 
 // TODO: add test for experimental / non enterpise feeds?
 // TODO: add test for deleted table
+// test: should only count tables once, even if they are watched by multiple changefeeds
 
 // TODO: do this in a less silly way. the complication comes from calling the
 // function both from a sql statement and from the changefeed frontier.
