@@ -5180,7 +5180,7 @@ func TestChangefeedErrors(t *testing.T) {
 
 	badHostErrRE := "client has run out of available brokers"
 	if KafkaV2Enabled.Get(&s.ClusterSettings().SV) {
-		badHostErrRE = "unable to dial.*no such host"
+		badHostErrRE = "(unable to dial.*no such host|unable to open connection to broker)"
 	}
 
 	// Check unavailable kafka.
