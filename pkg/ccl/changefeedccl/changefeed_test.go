@@ -5027,7 +5027,7 @@ func TestChangefeedErrors(t *testing.T) {
 	defer schemaReg.Close()
 
 	sqlDB := sqlutils.MakeSQLRunner(db)
-	sqlDB.SucceedsSoonDuration = 11 * time.Second // kgo's default dial timeout is 10s
+	sqlDB.SucceedsSoonDuration = 20 * time.Second // kgo's default dial timeout is 10s
 
 	sqlDB.Exec(t, `CREATE TABLE foo (a INT PRIMARY KEY, b STRING)`)
 	sqlDB.Exec(t, `CREATE DATABASE d`)
