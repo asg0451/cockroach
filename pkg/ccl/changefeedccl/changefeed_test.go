@@ -5027,7 +5027,8 @@ func TestChangefeedErrors(t *testing.T) {
 	defer schemaReg.Close()
 
 	sqlDB := sqlutils.MakeSQLRunner(db)
-	sqlDB.SucceedsSoonDuration = 20 * time.Second // kgo's default dial timeout is 10s
+	// For some reason, the test that results in a dns failure takes longer to give up than I'd expect based on the configuration.
+	sqlDB.SucceedsSoonDuration = 30 * time.Second
 
 	sqlDB.Exec(t, `CREATE TABLE foo (a INT PRIMARY KEY, b STRING)`)
 	sqlDB.Exec(t, `CREATE DATABASE d`)
@@ -5180,13 +5181,19 @@ func TestChangefeedErrors(t *testing.T) {
 
 	badHostErrRE := "client has run out of available brokers"
 	if KafkaV2Enabled.Get(&s.ClusterSettings().SV) {
-		badHostErrRE = "(unable to dial.*no such host|unable to open connection to broker)"
+		badHostErrRE = "(unable to dial.*no such host|unable to open connection to broker|lookup .* on .*: server misbehaving|connection refused)"
 	}
 
-	// Check unavailable kafka.
+	// Check unavailable kafka - bad dns.
 	sqlDB.ExpectErrWithTimeout(
 		t, badHostErrRE,
 		`CREATE CHANGEFEED FOR foo INTO 'kafka://nope'`,
+	)
+
+	// Check unavailable kafka - not running.
+	sqlDB.ExpectErrWithTimeout(
+		t, badHostErrRE,
+		`CREATE CHANGEFEED FOR foo INTO 'kafka://localhost:9999'`,
 	)
 
 	// Test that a well-formed URI gets as far as unavailable kafka error.
