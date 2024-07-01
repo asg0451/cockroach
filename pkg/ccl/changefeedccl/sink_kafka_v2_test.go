@@ -176,9 +176,6 @@ func TestKafkaSinkClientV2_Resize(t *testing.T) {
 	})
 }
 
-// TODOs:
-// - consider use https://golang.testcontainers.org/modules/kafka/ for an integration-lite test. how controllable is it?
-
 // These are really tests of the TopicNamer and our configuration of it.
 func TestKafkaSinkClientV2_Naming(t *testing.T) {
 	defer leaktest.AfterTest(t)()
@@ -197,7 +194,6 @@ func TestKafkaSinkClientV2_Naming(t *testing.T) {
 
 		require.NoError(t, fx.bs.EmitRow(fx.ctx, topic(`☃`), []byte(`k☃`), []byte(`v☃`), zeroTS, zeroTS, zeroAlloc))
 
-		// TODO: it seems like bs.Flush() will hang until it gets another row... or something. figure that out.
 		testutils.SucceedsSoon(t, func() error {
 			select {
 			case <-produced:
@@ -329,7 +325,6 @@ func TestKafkaSinkClientV2_ErrorsEventually(t *testing.T) {
 	// like if some records have already been produced and there's no way to
 	// safely give up without causing ordering issues. If we don't want this to
 	// happen, we would need to disable idempotency and set max inflight to 1.
-	// TODO: should we do this? like... maybe....
 	fx := newKafkaSinkV2Fx(t, withRealClient(), withKOptsClient([]kgo.Opt{kgo.RecordDeliveryTimeout(1 * time.Second)}))
 	defer fx.close()
 

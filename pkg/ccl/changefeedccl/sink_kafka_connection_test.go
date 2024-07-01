@@ -33,7 +33,7 @@ import (
 // Connections route to the correct sink.
 type externalConnectionKafkaSink struct {
 	sink            Sink
-	ignoreDialError bool // TODO: why is this necessary with the v2 kafka sink and not the v1?
+	ignoreDialError bool
 }
 
 func (e *externalConnectionKafkaSink) getConcreteType() sinkType {

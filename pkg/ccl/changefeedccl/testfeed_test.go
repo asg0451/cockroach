@@ -21,7 +21,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -1648,7 +1647,6 @@ func (p *asyncIgnoreCloseProducer) Close() error {
 type sinkKnobs struct {
 	// Only valid for the v1 sink.
 	kafkaInterceptor func(m *sarama.ProducerMessage, client kafkaClient) error
-	// v2Knobs *kafkaSinkV2Knobs
 }
 
 // fakeKafkaSink is a sink that arranges for fake kafka client and producer
@@ -1728,7 +1726,7 @@ func (s *fakeKafkaSink) Topics() []string {
 // to be used.
 type fakeKafkaSinkV2 struct {
 	Sink
-	// for compatibility with all the other fakeKafka test stuff, convert things to sarama messages.
+	// For compatibility with all the other fakeKafka test stuff, we convert kgo Records to sarama messages.
 	// TODO: clean this up when we remove the v1 sink.
 	feedCh      chan *sarama.ProducerMessage
 	t           *testing.T
@@ -1763,11 +1761,6 @@ func (s *fakeKafkaSinkV2) Dial() error {
 	s.client.EXPECT().Close().AnyTimes()
 
 	kc.client.Close()
-
-	buf := make([]byte, 1<<16)
-	_ = runtime.Stack(buf, false)
-	fmt.Printf("closed a client; stack:\n%s\n", buf)
-
 	kc.client = s.client
 
 	s.adminClient = mocks.NewMockKafkaAdminClientV2(s.ctrl)
@@ -1965,8 +1958,6 @@ func (k *kafkaFeed) Next() (*cdctest.TestFeedMessage, error) {
 			Topic:     msg.Topic,
 			Partition: `kafka`, // TODO(yevgeniy): support multiple partitions.
 		}
-
-		fmt.Printf("Next() received message: %q %#+v\n", string(msg.Value.(sarama.ByteEncoder)), msg)
 
 		decode := func(encoded sarama.Encoder, dest *[]byte) error {
 			// It's a bit weird to use encoder to get decoded bytes.

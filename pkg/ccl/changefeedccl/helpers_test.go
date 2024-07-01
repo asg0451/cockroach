@@ -99,16 +99,16 @@ func readNextMessages(
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		if true || log.V(1) {
-			fmt.Printf("About to read a message (%d out of %d)\n", len(actual), numMessages)
+		if log.V(1) {
+			log.Infof(context.Background(), `About to read a message (%d out of %d)`, len(actual), numMessages)
 		}
 		m, err := f.Next()
-		if true || log.V(1) {
+		if log.V(1) {
 			if m != nil {
-				fmt.Printf("msg %s: %s->%s (%s) (%s)\n",
+				log.Infof(context.Background(), `msg %s: %s->%s (%s) (%s)`,
 					m.Topic, m.Key, m.Value, m.Resolved, timeutil.Since(lastMessage))
 			} else {
-				fmt.Printf("err %v\n", err)
+				log.Infof(context.Background(), `err %v`, err)
 			}
 		}
 		lastMessage = timeutil.Now()
@@ -964,7 +964,7 @@ func makeFeedFactoryWithOptions(
 			Host:   s.SQLAddr()}, func() {}
 	}
 	switch sinkType {
-	case "kafka": // and then maybe something in here idk
+	case "kafka":
 		f := makeKafkaFeedFactory(t, srvOrCluster, db)
 		userDB, cleanup := getInitialDBForEnterpriseFactory(t, s, db, options)
 		f.(*kafkaFeedFactory).configureUserDB(userDB)

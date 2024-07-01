@@ -120,7 +120,7 @@ type kafkaClient interface {
 
 // kafkaSink emits to Kafka asynchronously. It is not concurrency-safe; all
 // calls to Emit and Flush should be from the same goroutine.
-// Deprecated: use kafkaSinkClient in sink_kafka_v2.go instead.
+// Deprecated: use kafkaSinkClientV2 in sink_kafka_v2.go instead.
 type kafkaSink struct {
 	ctx            context.Context
 	bootstrapAddrs string
@@ -1188,7 +1188,7 @@ func buildKafkaConfig(
 	}
 	config := sarama.NewConfig()
 	config.Producer.Return.Successes = true
-	config.Producer.Partitioner = newChangefeedPartitioner // this means that we send to one partition only per topic?
+	config.Producer.Partitioner = newChangefeedPartitioner
 	// Do not fetch metadata for all topics but just for the necessary ones.
 	config.Metadata.Full = false
 	config.MetricRegistry = newMetricsRegistryInterceptor(kafkaThrottlingMetrics)

@@ -156,7 +156,7 @@ func getAndDialSink(
 	}
 	if err := sink.Dial(); err != nil {
 		if err := sink.Close(); err != nil {
-			log.Warningf(ctx, "failed to close sink after dial error: %v", err)
+			return nil, errors.CombineErrors(err, errors.Wrap(err, `failed to close sink`))
 		}
 		return nil, err
 	}
