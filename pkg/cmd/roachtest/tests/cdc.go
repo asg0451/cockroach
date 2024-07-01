@@ -3450,8 +3450,7 @@ func (m *webhookManager) Start() (dest *url.URL) {
 			opts := option.WithNodes(m.webhookSinkNodes)
 			opts.ShouldRetryFn = func(*install.RunResultDetails) bool { return false }
 			if err = m.cluster.RunE(m.ctx, opts, serverExecCmd, rootFolder); err != nil {
-				fmt.Printf("webhook server died: %v\n", err)
-				m.t.L().Printf("webhook server died: %v", err)
+				m.t.L().Printf("webhook server died (did chaos kill it?): %v", err)
 			}
 			// Wait to be told to restart.
 			select {
