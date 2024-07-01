@@ -503,12 +503,17 @@ func buildKgoConfig(
 		return nil, errors.Errorf(`unknown compression codec: %v`, sinkCfg.Compression)
 	}
 
-	if sinkCfg.Version != "" {
-		v := kversion.FromString(sinkCfg.Version)
-		if v == nil {
-			return nil, errors.Errorf(`unknown kafka version: %s`, sinkCfg.Version)
+	if version := sinkCfg.Version; version != "" {
+		if !strings.HasPrefix(version, `v`) {
+			version = `v` + version
 		}
-		// TODO: make sure this is right. i think the intention of the setting is just to support really old versions, which is what the Max is for
+		v := kversion.FromString(version)
+		if v == nil {
+			return nil, errors.Errorf(`unknown kafka version: %s`, version)
+		}
+		// NOTE: This version of kgo doesnt support specifying max versions
+		// >3.6.0 (released Oct 10 2023). This option is only really needed for
+		// interacting with <v0.10.0 clusters anyway.
 		opts = append(opts, kgo.MaxVersions(v))
 	}
 

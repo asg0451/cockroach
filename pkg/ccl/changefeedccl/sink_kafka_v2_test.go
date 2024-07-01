@@ -293,7 +293,7 @@ func TestKafkaSinkClientV2_Opts(t *testing.T) {
 		"ClientID": "test",
 		"Compression": "gzip",
 		"RequiredAcks": "ALL",
-		"Version": "3.6.2",
+		"Version": "0.8.2.2",
 		"Flush": {
 			"Messages": 100,
 			"Bytes": 1000,
@@ -309,7 +309,7 @@ func TestKafkaSinkClientV2_Opts(t *testing.T) {
 			{"ClientID", "test"},
 			{"ProducerBatchCompression", []kgo.CompressionCodec{kgo.GzipCompression()}},
 			{"RequiredAcks", kgo.AllISRAcks()},
-			{"MaxVersions", kversion.V3_6_0()},
+			{"MaxVersions", kversion.V0_8_2()},
 		}
 
 		client := fx.bs.client.(*kafkaSinkClientV2).client.(*kgo.Client)
