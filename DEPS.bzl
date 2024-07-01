@@ -5505,11 +5505,9 @@ def go_deps():
         name = "com_github_klauspost_compress",
         build_file_proto_mode = "disable_global",
         importpath = "github.com/klauspost/compress",
-        sha256 = "648bbc7813dec448eec1a5a467750696bc7e41e1ac0a00b76a967c589826afb6",
-        strip_prefix = "github.com/klauspost/compress@v1.17.8",
-        urls = [
-            "https://storage.googleapis.com/cockroach-godeps/gomod/github.com/klauspost/compress/com_github_klauspost_compress-v1.17.8.zip",
-        ],
+        # TODO: mirror this repo (to fix, run `./dev generate bazel --mirror`)
+        sum = "h1:Ej5ixsIri7BrIjBkRZLTo6ghwrEtHFk7ijlczPW4fZ4=",
+        version = "v1.17.4",
     )
     go_repository(
         name = "com_github_klauspost_cpuid",
@@ -7345,11 +7343,9 @@ def go_deps():
         name = "com_github_pierrec_lz4_v4",
         build_file_proto_mode = "disable_global",
         importpath = "github.com/pierrec/lz4/v4",
-        sha256 = "bd2e8ef13800ca42205b0d4085a927a6d012b82cfa831769be4830036e953bec",
-        strip_prefix = "github.com/pierrec/lz4/v4@v4.1.21",
-        urls = [
-            "https://storage.googleapis.com/cockroach-godeps/gomod/github.com/pierrec/lz4/v4/com_github_pierrec_lz4_v4-v4.1.21.zip",
-        ],
+        # TODO: mirror this repo (to fix, run `./dev generate bazel --mirror`)
+        sum = "h1:tYLzDnjDXh9qIxSTKHwXwOYmm9d887Y7Y1ZkyXYHAN4=",
+        version = "v4.1.19",
     )
     go_repository(
         name = "com_github_pierrre_compare",
@@ -8472,31 +8468,25 @@ def go_deps():
         name = "com_github_twmb_franz_go",
         build_file_proto_mode = "disable_global",
         importpath = "github.com/twmb/franz-go",
-        sha256 = "c3801c33b2f074c5f7e1969b8eeff799ce61d406a71b8cd2fac8a9691fc773f2",
-        strip_prefix = "github.com/twmb/franz-go@v1.17.0",
-        urls = [
-            "https://storage.googleapis.com/cockroach-godeps/gomod/github.com/twmb/franz-go/com_github_twmb_franz_go-v1.17.0.zip",
-        ],
+        # TODO: mirror this repo (to fix, run `./dev generate bazel --mirror`)
+        sum = "h1:rpWc7fB9jd7TgmCyfxzenBI+QbgS8ZfJOUQE+tzPtbE=",
+        version = "v1.16.1",
     )
     go_repository(
         name = "com_github_twmb_franz_go_pkg_kadm",
         build_file_proto_mode = "disable_global",
         importpath = "github.com/twmb/franz-go/pkg/kadm",
-        sha256 = "8be9fe9307feea3b1a2c20886fb8f17354e53c6335aa6cb8a9ed494d66fcbc0d",
-        strip_prefix = "github.com/twmb/franz-go/pkg/kadm@v1.12.0",
-        urls = [
-            "https://storage.googleapis.com/cockroach-godeps/gomod/github.com/twmb/franz-go/pkg/kadm/com_github_twmb_franz_go_pkg_kadm-v1.12.0.zip",
-        ],
+        # TODO: mirror this repo (to fix, run `./dev generate bazel --mirror`)
+        sum = "h1:FfeWJ0qadntFpAcQt8JzNXW4dijjytZNLrzJuzzzuxA=",
+        version = "v1.11.0",
     )
     go_repository(
         name = "com_github_twmb_franz_go_pkg_kmsg",
         build_file_proto_mode = "disable_global",
         importpath = "github.com/twmb/franz-go/pkg/kmsg",
-        sha256 = "36c7bd41ee59195ec636fbdbe636328ed0700a6eef29a6d2e010ba85b46aa90c",
-        strip_prefix = "github.com/twmb/franz-go/pkg/kmsg@v1.8.0",
-        urls = [
-            "https://storage.googleapis.com/cockroach-godeps/gomod/github.com/twmb/franz-go/pkg/kmsg/com_github_twmb_franz_go_pkg_kmsg-v1.8.0.zip",
-        ],
+        # TODO: mirror this repo (to fix, run `./dev generate bazel --mirror`)
+        sum = "h1:a457IbvezYfA5UkiBvyV3zj0Is3y1i8EJgqjJYoij2E=",
+        version = "v1.7.0",
     )
     go_repository(
         name = "com_github_twpayne_go_geom",
@@ -11305,10 +11295,10 @@ def go_deps():
         name = "org_golang_x_crypto",
         build_file_proto_mode = "disable_global",
         importpath = "golang.org/x/crypto",
-        sha256 = "65d22b9f54aef5f7f064900d2ecf8d8b231729aebc46c3b7ca56ff897fb70b57",
-        strip_prefix = "golang.org/x/crypto@v0.23.0",
+        sha256 = "3148f58c2893286075e7e13e2de19d8e4fd9883debb6d76b45f7929e1d79e53e",
+        strip_prefix = "golang.org/x/crypto@v0.22.0",
         urls = [
-            "https://storage.googleapis.com/cockroach-godeps/gomod/golang.org/x/crypto/org_golang_x_crypto-v0.23.0.zip",
+            "https://storage.googleapis.com/cockroach-godeps/gomod/golang.org/x/crypto/org_golang_x_crypto-v0.22.0.zip",
         ],
     )
     go_repository(
@@ -11415,30 +11405,30 @@ def go_deps():
         name = "org_golang_x_sys",
         build_file_proto_mode = "disable_global",
         importpath = "golang.org/x/sys",
-        sha256 = "3f826b191eab1ebda925feb551d334e37e1b5865d1aa790fade46598811a8b1a",
-        strip_prefix = "golang.org/x/sys@v0.20.0",
+        sha256 = "f3e06adc66b840da7719fcf496d2916a38317706509fb5beed5932cd8ae5fb6b",
+        strip_prefix = "golang.org/x/sys@v0.19.0",
         urls = [
-            "https://storage.googleapis.com/cockroach-godeps/gomod/golang.org/x/sys/org_golang_x_sys-v0.20.0.zip",
+            "https://storage.googleapis.com/cockroach-godeps/gomod/golang.org/x/sys/org_golang_x_sys-v0.19.0.zip",
         ],
     )
     go_repository(
         name = "org_golang_x_term",
         build_file_proto_mode = "disable_global",
         importpath = "golang.org/x/term",
-        sha256 = "840eacc0ffb306dcb4b0f5bf6e071c91d2e7957fcc604eec4e73c0fc22f2920c",
-        strip_prefix = "golang.org/x/term@v0.20.0",
+        sha256 = "893e851afedc40a9c253e611fed322ec6f5a1c56180dd29229ff1cc1bd35dbfb",
+        strip_prefix = "golang.org/x/term@v0.19.0",
         urls = [
-            "https://storage.googleapis.com/cockroach-godeps/gomod/golang.org/x/term/org_golang_x_term-v0.20.0.zip",
+            "https://storage.googleapis.com/cockroach-godeps/gomod/golang.org/x/term/org_golang_x_term-v0.19.0.zip",
         ],
     )
     go_repository(
         name = "org_golang_x_text",
         build_file_proto_mode = "disable_global",
         importpath = "golang.org/x/text",
-        sha256 = "13faee7e46c8a18c8a28f3eceebf15db6d724b9a108c3c0482a6d2e58ba73a73",
-        strip_prefix = "golang.org/x/text@v0.15.0",
+        sha256 = "b9814897e0e09cd576a7a013f066c7db537a3d538d2e0f60f0caee9bc1b3f4af",
+        strip_prefix = "golang.org/x/text@v0.14.0",
         urls = [
-            "https://storage.googleapis.com/cockroach-godeps/gomod/golang.org/x/text/org_golang_x_text-v0.15.0.zip",
+            "https://storage.googleapis.com/cockroach-godeps/gomod/golang.org/x/text/org_golang_x_text-v0.14.0.zip",
         ],
     )
     go_repository(
