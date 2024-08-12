@@ -83,6 +83,8 @@ type TestingKnobs struct {
 	// BeforeWaitForJobsQuery is called once per invocation of the
 	// poll-show-jobs query in WaitForJobs.
 	BeforeWaitForJobsQuery func(jobs []jobspb.JobID)
+
+	StubTimeNow func() time.Time
 }
 
 // ModuleTestingKnobs is part of the base.ModuleTestingKnobs interface.

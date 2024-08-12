@@ -24,14 +24,16 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/jobs"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
+	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
-	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
+	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/require"
 )
 
@@ -573,72 +575,50 @@ func TestShowChangefeedJobsDefaultFilter(t *testing.T) {
 	defer log.Scope(t).Close(t)
 
 	testFn := func(t *testing.T, s TestServer, f cdctest.TestFeedFactory) {
-		// This is the first approach to update "TimeSource", it doesn't work.
-		{
-			tm := timeutil.Now().Add(-100 * time.Hour)
-			clock := timeutil.NewManualTime(tm)
-			timeSource := hlc.NewClockForTesting(clock)
-			knobs := jobs.TestingKnobs{}
-			knobs.TimeSource = timeSource
-			s.TestingKnobs.JobsTestingKnobs = &knobs
-		}
-
-		// This is the 2nd approach to update "TimeSource", it doesn't work.
-		{
-			tm := timeutil.Now().Add(-100 * time.Hour)
-			clock := timeutil.NewManualTime(tm)
-			knobs := s.TestingKnobs.
-				DistSQL.(*execinfra.TestingKnobs).
-				Changefeed.(*TestingKnobs)
-			knobs.TimeSource = clock
-		}
-
 		sqlDB := sqlutils.MakeSQLRunner(s.DB)
 
 		countChangefeedJobs := func() (count int) {
-			query := `SHOW CHANGEFEED JOBS`
-			rowResults := sqlDB.Query(t, query)
-
-			count = 0
-			for rowResults.Next() {
-				count++
-			}
+			query := `select count(*) from [SHOW CHANGEFEED JOBS]`
+			sqlDB.QueryRow(t, query).Scan(&count)
 			return count
+		}
+
+		changefeedJobExists := func(id catpb.JobID) bool {
+			rows := sqlDB.Query(t, `SHOW CHANGEFEED JOB $1`, id)
+			defer rows.Close()
+			more := rows.Next()
+			return more
 		}
 
 		sqlDB.Exec(t, `CREATE TABLE foo (a INT PRIMARY KEY, b STRING)`)
 
-		var foo cdctest.TestFeed
-		// Here are the 3 ways to create a changefeed, it seems they are the same for this test.
-		{
-			foo = feed(t, f, `CREATE CHANGEFEED FOR foo`)
-		}
-		{
-			fakeEndTime := s.Server.Clock().Now().Add(int64(time.Hour), 0).AsOfSystemTime()
-			foo = feed(t, f, "CREATE CHANGEFEED FOR foo WITH end_time = $1", fakeEndTime)
-		}
-		{
-			foo = feed(t, f, "CREATE CHANGEFEED FOR foo WITH initial_scan_only")
-		}
+		foo := feed(t, f, `CREATE CHANGEFEED FOR foo`) //  with initial_scan='only'
+		waitForJobStatus(sqlDB, t, foo.(cdctest.EnterpriseTestFeed).JobID(), jobs.StatusRunning)
 		require.Equal(t, 1, countChangefeedJobs())
 
 		closeFeed(t, foo)
 
-		// The job should disappear from the "SHOW CHANGEFEED JOBS" query.
-		require.Equal(t, 0, countChangefeedJobs())
+		testutils.SucceedsSoon(t, func() error {
+			// The job should disappear from the "SHOW CHANGEFEED JOBS" and
+			// "SHOW CHANGEFEED JOB [id]" queries, since its finished_at was set
+			// to 100 hours ago.
+			if changefeedJobExists(foo.(cdctest.EnterpriseTestFeed).JobID()) {
+				return errors.New("job still present in SHOW CHANGEFEED JOB [id]")
+			}
+			if countChangefeedJobs() != 0 {
+				return errors.New("job still present in SHOW CHANGEFEED JOBS")
+			}
+			return nil
+		})
 	}
 
-	// The 3rd way to update "TimeSource", it may works, but the test will hang forever.
 	updateKnobs := func(opts *feedTestOptions) {
 		opts.knobsFn = func(knobs *base.TestingKnobs) {
-			if jobsKnobs, ok := knobs.JobsTestingKnobs.(*jobs.TestingKnobs); ok {
-				tm := timeutil.Now().Add(-100 * time.Hour)
-				clock := timeutil.NewManualTime(tm)
-				timeSource := hlc.NewClockForTesting(clock)
-				jobsKnobs.TimeSource = timeSource
+			knobs.JobsTestingKnobs.(*jobs.TestingKnobs).StubTimeNow = func() time.Time {
+				return timeutil.Now().Add(-100 * time.Hour)
 			}
 		}
 	}
 
-	cdcTest(t, testFn, feedTestOmitSinks("sinkless"), updateKnobs)
+	cdcTest(t, testFn, feedTestForceSink("kafka"), updateKnobs)
 }
