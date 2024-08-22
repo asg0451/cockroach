@@ -19,13 +19,13 @@ import (
 )
 
 func (d *delegator) delegateNotify(n *tree.Notify) (tree.Statement, error) {
-	if n.Payload == nil {
-		n.Payload = tree.DNull
-	}
 	stmt := fmt.Sprintf(
 		`UPSERT INTO system.notifications (channel, payload, pid) VALUES (%s, %s, %d)`,
 		lexbase.EscapeSQLString(n.ChannelName.String()),
 		lexbase.EscapeSQLString(n.Payload.String()),
+		// TODO: cockroach session ids are uint128s, but the pid is an int32. so we cant really do anything correct here..
+		// could alternatively internally map sessionids to int32s with some sort of table or something.
+		// `UPSERT INTO system.notifications (channel, payload, pid) SELECT %s, %s, session_id FROM [SHOW session_id]`
 		os.Getpid(), // TODO: need an extendedEvalContext.SessionID, but d doesnt have that
 	)
 	return d.parse(stmt)
