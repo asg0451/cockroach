@@ -10,8 +10,28 @@
 
 package pgnotification
 
+import (
+	"fmt"
+
+	"github.com/jackc/pgconn"
+)
+
 type Notification struct {
 	Channel string
 	Payload string
 	PID     int32
+}
+
+
+// Stringify returns a human-readable string for the input pgconn.Notification
+// that matches psql's output for async notifications.
+func Stringify(notification *pgconn.Notification) string {
+	var payloadStr string
+	if len(notification.Payload) > 0 {
+		payloadStr = fmt.Sprintf(" with payload %q", notification.Payload)
+	}
+	return fmt.Sprintf(
+		"Asynchronous notification %q%s received from server with node ID %d.",
+		notification.Channel, payloadStr, notification.PID,
+	)
 }

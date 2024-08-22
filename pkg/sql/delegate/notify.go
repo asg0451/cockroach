@@ -19,6 +19,9 @@ import (
 )
 
 func (d *delegator) delegateNotify(n *tree.Notify) (tree.Statement, error) {
+	if n.Payload == nil {
+		n.Payload = tree.DNull
+	}
 	stmt := fmt.Sprintf(
 		`UPSERT INTO system.notifications (channel, payload, pid) VALUES (%s, %s, %d)`,
 		lexbase.EscapeSQLString(n.ChannelName.String()),

@@ -5,4 +5,5 @@ go_library(
     srcs = ["pgnotification.go"],
     importpath = "github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgnotification",
     visibility = ["//visibility:public"],
+    deps = ["@com_github_jackc_pgconn//:pgconn"],
 )
