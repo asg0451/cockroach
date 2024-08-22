@@ -1263,6 +1263,8 @@ func (ex *connExecutor) close(ctx context.Context, closeType closeType) {
 		log.Warningf(ctx, "error closing cursors: %v", err)
 	}
 
+	
+
 	// Free any memory used by the stats collector.
 	ex.statsCollector.Free(ctx)
 
