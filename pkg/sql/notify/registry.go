@@ -173,10 +173,7 @@ func (r *ListenerRegistry) AddListener(ctx context.Context, id ListenerID, chann
 	defer r.listenersMu.Unlock()
 
 	if _, ok := r.listenersMu.channels[channel]; !ok {
-		r.listenersMu.channels[channel] = &channelMux{
-			senders: make(map[ListenerID]NotificationSender, 1),
-			ch:      make(chan pgnotification.Notification, channelQueueSize.Get(&r.settings.SV)),
-		}
+		r.listenersMu.channels[channel] = newChannelMux(int(channelQueueSize.Get(&r.settings.SV)))
 	}
 	if log.V(2) {
 		log.Infof(ctx, "adding listener %d to %s", id, channel)
