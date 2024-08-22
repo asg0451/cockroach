@@ -200,6 +200,7 @@ func (r *ListenerRegistry) RemoveAllListeners(ctx context.Context, id ListenerID
 	r.listenersMu.Lock()
 	defer r.listenersMu.Unlock()
 
+	// TODO: index this by session id as well just for this?
 	for channel, cm := range r.listenersMu.channels {
 		cm.RemoveSender(id)
 		if len(cm.senders) == 0 {

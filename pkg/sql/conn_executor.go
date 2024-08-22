@@ -1263,7 +1263,7 @@ func (ex *connExecutor) close(ctx context.Context, closeType closeType) {
 		log.Warningf(ctx, "error closing cursors: %v", err)
 	}
 
-	
+	// TODO: do i need to drain notifications? it's probably not an issue if i dont
 
 	// Free any memory used by the stats collector.
 	ex.statsCollector.Free(ctx)
