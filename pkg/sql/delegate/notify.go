@@ -23,10 +23,19 @@ func (d *delegator) delegateNotify(n *tree.Notify) (tree.Statement, error) {
 		`UPSERT INTO system.notifications (channel, payload, pid) VALUES (%s, %s, %d)`,
 		lexbase.EscapeSQLString(n.ChannelName.String()),
 		lexbase.EscapeSQLString(n.Payload.String()),
-		// TODO: cockroach session ids are uint128s, but the pid is an int32. so we cant really do anything correct here..
+		// TODO: cockroach session ids are stringified uint128s, but the pid is an int32. so we cant really do anything correct here..
 		// could alternatively internally map sessionids to int32s with some sort of table or something.
+
+		// set serial_normalization = sql_sequence_cached;
+		// create table system.sessions_pids (session_id text primary key, pid serial4 not null);
+
+		// listen -> insert into sessions_pids (session_id) select session_id from [SHOW session_id]; (and also register internally)
+		// unlisten -> delete from sessions_pids where session_id = (select session_id from [SHOW session_id]); (and also unregister internally)
+		// notify -> upsert into system.notifications (channel, payload, pid) select %s, %s, pid from sessions_pids where session_id = (select session_id from [SHOW session_id]);
+
 		// `UPSERT INTO system.notifications (channel, payload, pid) SELECT %s, %s, session_id FROM [SHOW session_id]`
-		os.Getpid(), // TODO: need an extendedEvalContext.SessionID, but d doesnt have that
+
+		os.Getpid(),
 	)
 	return d.parse(stmt)
 }
