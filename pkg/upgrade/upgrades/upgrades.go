@@ -157,10 +157,10 @@ var upgrades = []upgradebase.Upgrade{
 	),
 
 	upgrade.NewTenantUpgrade(
-		"add new table for listen/notify queue",
+		"add new tables for listen/notify queue",
 		clusterversion.V24_3_ListenNotifyQueue.Version(),
 		upgrade.NoPrecondition,
-		createListenNotifyQueyeTables,
+		createListenNotifyTables,
 		upgrade.RestoreActionNotRequired("idk lol"),
 	),
 

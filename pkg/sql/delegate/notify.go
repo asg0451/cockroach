@@ -12,7 +12,6 @@ package delegate
 
 import (
 	"fmt"
-	"os"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/lexbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
@@ -20,7 +19,8 @@ import (
 
 func (d *delegator) delegateNotify(n *tree.Notify) (tree.Statement, error) {
 	stmt := fmt.Sprintf(
-		`UPSERT INTO system.notifications (channel, payload, pid) VALUES (%s, %s, %d)`,
+		// notify -> upsert into system.notifications (channel, payload, pid) select %s, %s, pid from sessions_pids where session_id = (select session_id from [SHOW session_id]);
+		`UPSERT INTO system.notifications (channel, payload, pid) SELECT %s, %s, pid FROM system.notifications_session_id_pids WHERE session_id = (SELECT session_id FROM [SHOW session_id])`,
 		lexbase.EscapeSQLString(n.ChannelName.String()),
 		lexbase.EscapeSQLString(n.Payload.String()),
 		// TODO: cockroach session ids are stringified uint128s, but the pid is an int32. so we cant really do anything correct here..
@@ -35,7 +35,7 @@ func (d *delegator) delegateNotify(n *tree.Notify) (tree.Statement, error) {
 
 		// `UPSERT INTO system.notifications (channel, payload, pid) SELECT %s, %s, session_id FROM [SHOW session_id]`
 
-		os.Getpid(),
+		// os.Getpid(),
 	)
 	return d.parse(stmt)
 }

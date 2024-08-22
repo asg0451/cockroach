@@ -457,6 +457,8 @@ func addSystemDescriptorsToSchema(target *MetadataSchema) {
 
 	// Tables introduced in 24.2.
 	target.AddDescriptor(systemschema.ListenNotifyQueueTable)
+	target.AddDescriptor(systemschema.ListenNotifySessionPIDMappingTable)
+	target.AddDescriptor(systemschema.ListenNotifySessionPIDMappingSequence)
 
 	// Adding a new system table? It should be added here to the metadata schema,
 	// and also created as a migration for older clusters.

@@ -124,7 +124,16 @@ CREATE TABLE system.tenants (
 CREATE TABLE system.notifications (
 	channel STRING NOT NULL PRIMARY KEY,
 	payload STRING,
-	pid INT4 NOT NULL,
+	pid STRING NOT NULL
+);`
+
+	ListenNotifySessionPIDMappingSequenceSchema = `
+CREATE SEQUENCE system.notifications_session_id_pids_pid_seq;`
+
+	ListenNotifySessionPIDMappingTableSchema = `
+CREATE TABLE system.notifications_session_id_pids (
+	session_id STRING NOT NULL PRIMARY KEY,
+	pid INT4 NOT NULL DEFAULT nextval('system.notifications_session_id_pids_pid_seq')
 );`
 
 	// RoleIDSequenceSchema starts at 100 so we have reserved IDs for special
@@ -1426,6 +1435,8 @@ func MakeSystemTables() []SystemTable {
 		StatementExecInsightsTable,
 		TransactionExecInsightsTable,
 		ListenNotifyQueueTable,
+		ListenNotifySessionPIDMappingSequence,
+		ListenNotifySessionPIDMappingTable,
 	}
 }
 
@@ -4759,7 +4770,7 @@ var ListenNotifyQueueTable = makeSystemTable(
 		[]descpb.ColumnDescriptor{
 			{Name: "channel", ID: 1, Type: types.String},
 			{Name: "payload", ID: 2, Type: types.String, Nullable: true},
-			{Name: "pid", ID: 3, Type: types.Int4},
+			{Name: "pid", ID: 3, Type: types.String},
 		},
 		[]descpb.ColumnFamilyDescriptor{{
 			Name:        "primary",
@@ -4768,4 +4779,66 @@ var ListenNotifyQueueTable = makeSystemTable(
 			ColumnIDs:   []descpb.ColumnID{1, 2, 3},
 		}},
 		pk("channel"),
+	))
+
+var ListenNotifySessionPIDMappingSequence = makeSystemTable(
+	ListenNotifySessionPIDMappingSequenceSchema,
+	systemTable(
+		catconstants.ListenNotifySessionPIDSequenceName,
+		descpb.InvalidID, // dynamically assigned table ID
+		[]descpb.ColumnDescriptor{
+			{Name: tabledesc.SequenceColumnName, ID: tabledesc.SequenceColumnID, Type: types.Int},
+		},
+		[]descpb.ColumnFamilyDescriptor{{
+			Name:            "primary",
+			ID:              keys.SequenceColumnFamilyID,
+			ColumnNames:     []string{tabledesc.SequenceColumnName},
+			ColumnIDs:       []descpb.ColumnID{tabledesc.SequenceColumnID},
+			DefaultColumnID: tabledesc.SequenceColumnID,
+		}},
+		descpb.IndexDescriptor{
+			ID:                  keys.SequenceIndexID,
+			Name:                tabledesc.LegacyPrimaryKeyIndexName,
+			KeyColumnIDs:        []descpb.ColumnID{tabledesc.SequenceColumnID},
+			KeyColumnNames:      []string{tabledesc.SequenceColumnName},
+			KeyColumnDirections: []catenumpb.IndexColumn_Direction{catenumpb.IndexColumn_ASC},
+		},
+	),
+	func(tbl *descpb.TableDescriptor) {
+		tbl.SequenceOpts = &descpb.TableDescriptor_SequenceOpts{
+			Increment: 1,
+			MinValue:  1,
+			MaxValue:  math.MaxInt64,
+			Start:     1,
+			CacheSize: 1,
+		}
+		tbl.NextColumnID = 0
+		tbl.NextFamilyID = 0
+		tbl.NextIndexID = 0
+		tbl.NextMutationID = 0
+		// Sequences never exposed their internal constraints,
+		// so all IDs will be left at zero. CREATE SEQUENCE has
+		// the same behaviour.
+		tbl.NextConstraintID = 0
+		tbl.PrimaryIndex.ConstraintID = 0
+	},
+)
+
+var dexp = `nextval('system.notifications_session_id_pids_pid_seq')`
+var ListenNotifySessionPIDMappingTable = makeSystemTable(
+	ListenNotifySessionPIDMappingTableSchema,
+	systemTable(
+		catconstants.ListenNotifySessionPIDMappingTableName,
+		descpb.InvalidID, // dynamically assigned table ID
+		[]descpb.ColumnDescriptor{
+			{Name: "session_id", ID: 1, Type: types.String},
+			{Name: "pid", ID: 2, Type: types.Int4, DefaultExpr: &dexp},
+		},
+		[]descpb.ColumnFamilyDescriptor{{
+			Name:        "primary",
+			ID:          0,
+			ColumnNames: []string{"session_id", "pid"},
+			ColumnIDs:   []descpb.ColumnID{1, 2},
+		}},
+		pk("session_id"),
 	))

@@ -12,9 +12,11 @@ package sql
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/notify"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/util/errorutil/unimplemented"
 )
 
@@ -26,14 +28,29 @@ func (ln *listenNode) Close(_ context.Context)             {}
 func (ln *listenNode) Next(params runParams) (bool, error) { return false, nil }
 func (ln *listenNode) Values() tree.Datums                 { return nil }
 func (ln *listenNode) startExec(params runParams) error {
-	// TODO: how do we make this respect transaction semantics? only applied on commit if in a
 	if !params.extendedEvalCtx.TxnImplicit {
 		return unimplemented.New("listen", "cannot be used inside a transaction")
 	}
 
-	registry := params.p.execCfg.PGListenerRegistry
 	sessionID := params.extendedEvalCtx.SessionID
-	registry.AddListener(params.ctx, notify.ListenerID(sessionID), ln.n.ChannelName.String(), params.p.notificationSender)
+
+	// TODO: a session can listen to multiple channels, so we should only add if we're the first.
+	row, err := params.p.execCfg.InternalDB.Executor().QueryRowEx(
+		params.ctx,
+		"insert-session-pid",
+		params.p.txn,
+		sessiondata.InternalExecutorOverride{},
+		"insert into system.notifications_session_id_pids (session_id) values ($1) returning pid",
+		sessionID.String(),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to insert session pid: %w", err)
+	}
+	pid := int32(tree.MustBeDInt(row[0]))
+	fmt.Printf("pid: %d\n", pid)
+
+	registry := params.p.execCfg.PGListenerRegistry
+	registry.AddListener(params.ctx, notify.ListenerID(sessionID), pid, ln.n.ChannelName.String(), params.p.notificationSender)
 	return nil
 }
 

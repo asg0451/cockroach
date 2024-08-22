@@ -50,10 +50,15 @@ type NotificationSender interface {
 
 type ListenerID clusterunique.ID
 
+type senderWithFakePID struct {
+	sender  NotificationSender
+	fakePID int32
+}
+
 type channelMux struct {
 	mu       syncutil.Mutex
 	ch       chan pgnotification.Notification
-	senders  map[ListenerID]NotificationSender
+	senders  map[ListenerID]senderWithFakePID
 	batchBuf []pgnotification.Notification
 }
 
@@ -62,17 +67,17 @@ const batchSize = 256
 func newChannelMux(queueSize int) *channelMux {
 	return &channelMux{
 		ch:       make(chan pgnotification.Notification, queueSize),
-		senders:  make(map[ListenerID]NotificationSender, 1),
+		senders:  make(map[ListenerID]senderWithFakePID, 1),
 		batchBuf: make([]pgnotification.Notification, 0, batchSize),
 	}
 }
 
-func (cm *channelMux) AddSender(id ListenerID, s NotificationSender) {
+func (cm *channelMux) AddSender(id ListenerID, fakePID int32, s NotificationSender) {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 
 	// TODO: is it cool to overwrite this if one exists already?
-	cm.senders[id] = s
+	cm.senders[id] = senderWithFakePID{sender: s, fakePID: fakePID}
 }
 
 func (cm *channelMux) RemoveSender(id ListenerID) {
@@ -109,7 +114,8 @@ fill:
 			// TODO:
 			// - guard against slow clients
 			// - handle errors (poison connection? remove listener?)
-			if err := s.SendNotification(n); err != nil {
+			n.PID = s.fakePID
+			if err := s.sender.SendNotification(n); err != nil {
 				log.Warningf(ctx, "error sending notification: %v", err)
 			}
 		}
@@ -163,7 +169,7 @@ func NewRegistry(
 	return r
 }
 
-func (r *ListenerRegistry) AddListener(ctx context.Context, id ListenerID, channel string, sender NotificationSender) {
+func (r *ListenerRegistry) AddListener(ctx context.Context, id ListenerID, fakePID int32, channel string, sender NotificationSender) {
 	if !notificationsEnabled.Get(&r.settings.SV) {
 		// TODO: send a notice?
 		return
@@ -178,7 +184,7 @@ func (r *ListenerRegistry) AddListener(ctx context.Context, id ListenerID, chann
 	if log.V(2) {
 		log.Infof(ctx, "adding listener %d to %s", id, channel)
 	}
-	r.listenersMu.channels[channel].AddSender(id, sender)
+	r.listenersMu.channels[channel].AddSender(id, fakePID, sender)
 }
 
 func (r *ListenerRegistry) RemoveListener(ctx context.Context, id ListenerID, channel string) {

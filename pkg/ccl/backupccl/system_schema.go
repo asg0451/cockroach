@@ -850,6 +850,12 @@ var systemTableBackupConfiguration = map[string]systemBackupConfiguration{
 	systemschema.ListenNotifyQueueTable.GetName(): {
 		shouldIncludeInClusterBackup: optOutOfClusterBackup,
 	},
+	systemschema.ListenNotifySessionPIDMappingTable.GetName(): {
+		shouldIncludeInClusterBackup: optOutOfClusterBackup,
+	},
+	systemschema.ListenNotifySessionPIDMappingSequence.GetName(): {
+		shouldIncludeInClusterBackup: optOutOfClusterBackup,
+	},
 }
 
 func rekeySystemTable(

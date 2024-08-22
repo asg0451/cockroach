@@ -19,11 +19,19 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/upgrade"
 )
 
-func createListenNotifyQueyeTables(
+func createListenNotifyTables(
 	ctx context.Context, cv clusterversion.ClusterVersion, d upgrade.TenantDeps,
 ) error {
-	if err := createSystemTable(ctx, d.DB, d.Settings, d.Codec, systemschema.ListenNotifyQueueTable, tree.LocalityLevelTable); err != nil {
-		return err
+	descs := []systemschema.SystemTable{
+		systemschema.ListenNotifySessionPIDMappingSequence,
+		systemschema.ListenNotifySessionPIDMappingTable,
+		systemschema.ListenNotifyQueueTable,
+	}
+
+	for _, desc := range descs {
+		if err := createSystemTable(ctx, d.DB, d.Settings, d.Codec, desc, tree.LocalityLevelTable); err != nil {
+			return err
+		}
 	}
 	return nil
 }

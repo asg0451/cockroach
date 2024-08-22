@@ -79,6 +79,8 @@ var (
 		catconstants.TxnExecInsightsTableName,
 		catconstants.StmtExecInsightsTableName,
 		catconstants.ListenNotifyQueueTableName,
+		catconstants.ListenNotifySessionPIDSequenceName,
+		catconstants.ListenNotifySessionPIDMappingTableName,
 	}
 
 	readWriteSystemSequences = []catconstants.SystemTableName{

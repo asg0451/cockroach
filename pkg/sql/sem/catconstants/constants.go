@@ -59,6 +59,8 @@ const (
 	TenantIDSequenceTableName              SystemTableName = "tenant_id_seq"
 	TenantsTableName                       SystemTableName = "tenants"
 	ListenNotifyQueueTableName             SystemTableName = "notifications"
+	ListenNotifySessionPIDMappingTableName SystemTableName = "notifications_session_id_pids"
+	ListenNotifySessionPIDSequenceName     SystemTableName = "notifications_session_id_pids_pid_seq"
 	LeaseTableName                         SystemTableName = "lease"
 	EventLogTableName                      SystemTableName = "eventlog"
 	RangeEventTableName                    SystemTableName = "rangelog"
