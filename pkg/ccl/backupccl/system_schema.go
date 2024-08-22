@@ -848,7 +848,7 @@ var systemTableBackupConfiguration = map[string]systemBackupConfiguration{
 		shouldIncludeInClusterBackup: optOutOfClusterBackup,
 	},
 	systemschema.ListenNotifyQueueTable.GetName(): {
-		shouldIncludeInClusterBackup: optInToClusterBackup, // ?
+		shouldIncludeInClusterBackup: optOutOfClusterBackup,
 	},
 }
 
