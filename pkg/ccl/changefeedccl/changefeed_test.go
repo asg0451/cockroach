@@ -58,9 +58,11 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/server"
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
+	"github.com/cockroachdb/cockroach/pkg/spanconfig/spanconfigptsreader"
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/desctestutils"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/systemschema"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/flowinfra"
@@ -93,6 +95,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
+	"github.com/davecgh/go-spew/spew"
 	"github.com/dustin/go-humanize"
 	"github.com/lib/pq"
 	"github.com/stretchr/testify/assert"
@@ -9579,4 +9582,121 @@ func TestChangefeedProtectedTimestampUpdate(t *testing.T) {
 	}
 
 	cdcTest(t, testFn, feedTestForceSink("kafka"))
+}
+
+func TestChangefeedPausedPTS(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	ctx := context.Background()
+	s, db, stopServer := startTestFullServer(t, feedTestOptions{})
+	defer stopServer()
+
+	sqlDB := sqlutils.MakeSQLRunner(db)
+	// changefeedbase.FrontierCheckpointFrequency.Override(
+	// 	context.Background(), &s.Server.ClusterSettings().SV, 10*time.Millisecond)
+	// changefeedbase.ProtectTimestampInterval.Override(
+	// 	context.Background(), &s.Server.ClusterSettings().SV, 10*time.Millisecond)
+	// changefeedbase.ProtectTimestampLag.Override(
+	// 	context.Background(), &s.Server.ClusterSettings().SV, 10*time.Hour)
+
+	// The following code was shameless stolen from
+	// TestShowTenantFingerprintsProtectsTimestamp which almost
+	// surely copied it from the 2-3 other tests that have
+	// something similar.  We should put this in a helper. We have
+	// ForceTableGC, but in ad-hoc testing that appeared to bypass
+	// the PTS record making it useless for this test.
+	//
+	// TODO(ssd): Make a helper that does this.
+	refreshPTSReaderCache := func(asOf hlc.Timestamp, dbName, tableName string) {
+		tableID, err := s.QueryTableID(ctx, username.RootUserName(), dbName, tableName)
+		require.NoError(t, err)
+		tableKey := s.Codec().TablePrefix(uint32(tableID))
+		store, err := s.StorageLayer().GetStores().(*kvserver.Stores).GetStore(s.GetFirstStoreID())
+		require.NoError(t, err)
+		var repl *kvserver.Replica
+		testutils.SucceedsSoon(t, func() error {
+			repl = store.LookupReplica(roachpb.RKey(tableKey))
+			if repl == nil {
+				return errors.New("could not find replica")
+			}
+			return nil
+		})
+		ptsReader := store.GetStoreConfig().ProtectedTimestampReader
+		t.Logf("updating PTS reader cache to %s", asOf)
+		require.NoError(
+			t,
+			spanconfigptsreader.TestingRefreshPTSState(ctx, t, ptsReader, asOf),
+		)
+		require.NoError(t, repl.ReadProtectedTimestampsForTesting(ctx))
+	}
+	gcTestTableRange := func(dbName, tableName string) {
+		row := sqlDB.QueryRow(t, fmt.Sprintf("SELECT range_id FROM [SHOW RANGES FROM TABLE %s.%s]", dbName, tableName))
+		var rangeID int64
+		row.Scan(&rangeID)
+		refreshPTSReaderCache(s.Clock().Now(), dbName, tableName)
+		t.Logf("enqueuing range %d for mvccGC", rangeID)
+		sqlDB.Exec(t, `SELECT crdb_internal.kv_enqueue_replica($1, 'mvccGC', true)`, rangeID)
+	}
+
+	sqlDB.Exec(t, `ALTER DATABASE system CONFIGURE ZONE USING gc.ttlseconds = 1`)
+	sqlDB.Exec(t, `CREATE TABLE defaultdb.foo (id INT)`)
+	sqlDB.Exec(t, `INSERT INTO defaultdb.foo VALUES (1)`)
+	sqlDB.Exec(t, `CREATE USER test`)
+	sqlDB.Exec(t, `GRANT admin TO test`)
+
+	var jobID jobspb.JobID
+	sqlDB.QueryRow(t, `CREATE CHANGEFEED into 'null://' WITH resolved='10ms', no_initial_scan AS SELECT *, crdb_internal_mvcc_timestamp from defaultdb.foo where id > 0`).Scan(&jobID)
+
+	getHWM := func() hlc.Timestamp {
+		var details []byte
+		sqlDB.QueryRow(t, jobutils.JobProgressByIDQuery, jobID).Scan(&details)
+
+		var progress jobspb.Progress
+		require.NoError(t, protoutil.Unmarshal(details, &progress))
+
+		if hwm := progress.GetHighWater(); hwm != nil {
+			return *hwm
+		}
+		return hlc.Timestamp{}
+	}
+
+	// Wait for the changefeed to checkpoint.
+	lastHWM := hlc.Timestamp{}
+	checkHWM := func() error {
+		hwm := getHWM()
+		if !hwm.IsEmpty() && lastHWM.Less(hwm) {
+			return nil
+		}
+		return errors.New("waiting for high watermark to advance")
+	}
+	testutils.SucceedsSoon(t, checkHWM)
+
+	// DBG
+	ptss := sqlDB.QueryStr(t, `SELECT * FROM system.protected_ts_records`)
+	spew.Dump(ptss)
+
+	// Pause the feed.
+	sqlDB.Exec(t, `PAUSE JOB $1`, jobID)
+
+	// Make some changes.
+	sqlDB.Exec(t, `INSERT INTO defaultdb.foo VALUES (2)`)
+	sqlDB.Exec(t, "ALTER TABLE defaultdb.foo ADD COLUMN c STRING")
+	sqlDB.Exec(t, `COMMENT ON TABLE defaultdb.foo IS 'some comment idk'`)
+	sqlDB.Exec(t, "REVOKE admin FROM test")
+	sqlDB.Exec(t, `INSERT INTO defaultdb.foo (id, c) VALUES (3, 'a')`)
+
+	// GC the table and all system tables, to simulate being paused for a long time.
+	gcTestTableRange("defaultdb", "foo")
+	for _, t := range systemschema.MakeSystemTables() {
+		if t.IsPhysicalTable() && !t.IsSequence() {
+			gcTestTableRange("system", t.GetName())
+		}
+	}
+
+	// Resume the feed.
+	sqlDB.Exec(t, `RESUME JOB $1`, jobID)
+
+	// Wait for the changefeed to checkpoint again.
+	testutils.SucceedsSoon(t, checkHWM)
 }
