@@ -516,6 +516,8 @@ func RoleExists(ctx context.Context, txn isql.Txn, role username.SQLUsername) (b
 
 var roleMembersTableName = tree.MakeTableNameWithSchema("system", catconstants.PublicSchemaName, "role_members")
 
+// TODO: this stuff??
+
 // BumpRoleMembershipTableVersion increases the table version for the
 // role membership table.
 func (p *planner) BumpRoleMembershipTableVersion(ctx context.Context) error {
