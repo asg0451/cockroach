@@ -8,6 +8,8 @@ package changefeedccl
 import (
 	"context"
 	"fmt"
+	"regexp"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -25,12 +27,14 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/protectedts/ptpb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/security/username"
+	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/spanconfig"
 	"github.com/cockroachdb/cockroach/pkg/spanconfig/spanconfigptsreader"
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/bootstrap"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/desctestutils"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/systemschema"
 	"github.com/cockroachdb/cockroach/pkg/sql/distsql"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/isql"
@@ -518,7 +522,7 @@ func TestPTSRecordProtectsTargetsAndSystemTables(t *testing.T) {
 	sqlDB.Exec(t, "ALTER TABLE foo ADD COLUMN d STRING")
 
 	// Remove this entry from role_members.
-	sqlDB.Exec(t, "REVOKE admin FROM test")
+	sqlDB.Exec(t, "REVOKE admin FROM testuser")
 
 	time.Sleep(2 * time.Second)
 	// If you want to GC all system tables:
@@ -681,6 +685,243 @@ func TestChangefeedMigratesProtectedTimestamps(t *testing.T) {
 	cdcTestWithSystem(t, testFn, feedTestEnterpriseSinks)
 }
 
+func TestChangefeedProtectsAllTablesItNeeds(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	testFn := func(t *testing.T, s TestServerWithSystem, f cdctest.TestFeedFactory) {
+		ctx := context.Background()
+
+		ptsInterval := 50 * time.Millisecond
+		changefeedbase.ProtectTimestampInterval.Override(
+			context.Background(), &s.Server.ClusterSettings().SV, ptsInterval)
+		changefeedbase.ProtectTimestampLag.Override(
+			context.Background(), &s.Server.ClusterSettings().SV, ptsInterval)
+
+		sqlDB := sqlutils.MakeSQLRunner(s.SystemServer.SQLConn(t))
+		// sqlDB := sqlutils.MakeSQLRunner(s.DB) ?
+		// for tenant stuff -- sysDB := sqlutils.MakeSQLRunner(s.SystemServer.SQLConn(t))
+
+		sqlDB.Exec(t, "SET CLUSTER SETTING kv.protectedts.poll_interval = '10ms'")
+		sqlDB.Exec(t, "SET CLUSTER SETTING kv.closed_timestamp.target_duration = '100ms'")
+		sqlDB.Exec(t, "SET CLUSTER SETTING kv.rangefeed.closed_timestamp_refresh_interval = '0s'")
+		sqlDB.Exec(t, `ALTER DATABASE system CONFIGURE ZONE USING gc.ttlseconds = 1`)
+		sqlDB.Exec(t, "CREATE TABLE defaultdb.foo (a INT PRIMARY KEY, b STRING)")
+		sqlDB.Exec(t, `CREATE USER testuser`)
+		sqlDB.Exec(t, `GRANT admin TO enterprisefeeduser`) // TODO: why is this necessary? and does it mess up our testing?
+
+		fooDescr := cdctest.GetHydratedTableDescriptor(t, s.Server.ExecutorConfig(), "defaultdb", "foo")
+		var targets changefeedbase.Targets
+		targets.Add(changefeedbase.Target{TableID: fooDescr.GetID()})
+
+		t.Logf("Creating starting state")
+		// mutateEverySystemTable(t, ctx, sqlDB, s.Server.ClusterSettings())
+		sqlDB.Exec(t, `GRANT admin TO testuser`)
+		sqlDB.Exec(t, "INSERT INTO defaultdb.foo (a, b) VALUES (1, 'first val')")
+
+		// asOfTs := s.Server.Clock().Now()
+		systemTables := systemschema.MakeSystemTables()
+
+		t.Logf("Starting changefeed")
+		// feed := feed(t, f, `CREATE CHANGEFEED FOR defaultdb.foo WITH resolved = '20ms'`)
+		// TODO: query fns?
+		feed := feed(t, f, `CREATE CHANGEFEED AS SELECT * FROM defaultdb.foo`)
+		defer closeFeed(t, feed)
+		jobFeed := feed.(cdctest.EnterpriseTestFeed)
+
+		t.Logf("Waiting until the feed makes its PTS record")
+		registry := s.Server.JobRegistry().(*jobs.Registry)
+		testutils.SucceedsSoon(t, func() error {
+			job, err := registry.LoadJob(ctx, jobFeed.JobID())
+			if err != nil {
+				return err
+			}
+			progress := job.Progress()
+			uid := progress.GetChangefeed().ProtectedTimestampRecord
+			if uid == uuid.Nil {
+				return errors.Newf("no pts record")
+			}
+			t.Logf("changefeed created pts record: %s", uid)
+			return nil
+		})
+
+		t.Logf("Pausing feed")
+		require.NoError(t, jobFeed.Pause())
+
+		t.Logf("Overwriting table data to cause expiry")
+		// mutateEverySystemTable(t, ctx, sqlDB, s.Server.ClusterSettings())
+		// - foo
+		sqlDB.Exec(t, "UPDATE defaultdb.foo SET b = 'second val' WHERE a = 1")
+		// - system.descriptor
+		sqlDB.Exec(t, "ALTER TABLE defaultdb.foo ADD COLUMN c STRING")
+		sqlDB.Exec(t, "ALTER TABLE defaultdb.foo ADD COLUMN d STRING")
+		// - system.role_members.
+		sqlDB.Exec(t, "REVOKE admin FROM testuser")
+		// TODO: do something that affects every system table.
+
+		time.Sleep(2 * time.Second)
+
+		t.Logf("Forcing GC on all system tables and targets")
+		clearCacheNow := s.SystemServer.Clock().Now()
+		for _, tab := range systemTables {
+			if tab.IsPhysicalTable() && !tab.IsSequence() {
+				gcTestTableRange(t, ctx, s.SystemServer, sqlDB, "system", tab.GetName(), clearCacheNow)
+			}
+		}
+		gcTestTableRange(t, ctx, s.SystemServer, sqlDB, "defaultdb", "foo", clearCacheNow)
+
+		t.Logf("Resuming feed")
+		sqlDB.Exec(t, `RESUME JOB $1`, jobFeed.JobID())
+		require.NoError(t, jobFeed.WaitForStatus(func(s jobs.Status) bool { return s == jobs.StatusRunning || s == jobs.StatusFailed }))
+
+		status := sqlDB.QueryStr(t, `SELECT status FROM [SHOW CHANGEFEED JOB $1]`, jobFeed.JobID())[0][0]
+		require.Equal(t, jobs.StatusRunning, jobs.Status(status))
+
+		t.Logf("Waiting for feed to catch up")
+		assertPayloads(t, feed, []string{
+			`foo: [1]->{"a": 1, "b": "first val"}`,
+			`foo: [1]->{"a": 1, "b": "second val"}`,
+		})
+
+		t.Logf("Is it still running?")
+		sqlDB.Exec(t, "UPDATE defaultdb.foo SET b = 'third val' WHERE a = 1")
+		// The message will have other fields on it now as a result of the
+		// mutations, so just check that the value's in there somewhere.
+		msgs, err := readNextMessages(ctx, feed, 1)
+		require.NoError(t, err)
+		require.Contains(t, string(msgs[0].Value), "third val")
+
+		status = sqlDB.QueryStr(t, `SELECT status FROM [SHOW CHANGEFEED JOB $1]`, jobFeed.JobID())[0][0]
+		require.Equal(t, jobs.StatusRunning, jobs.Status(status))
+	}
+
+	// TODO: remove no-tenants once this is working
+	cdcTestWithSystem(t, testFn, feedTestEnterpriseSinks, feedTestNoTenants)
+}
+
+var mutateEverySystemTableCounter int
+
+// assumes: defaultdb.foo, gc.ttlseconds = 100, testuser
+func mutateEverySystemTable(t *testing.T, ctx context.Context, sqlDB *sqlutils.SQLRunner, settings *cluster.Settings) {
+	defer func() { mutateEverySystemTableCounter++ }()
+	knownTableMutations := map[string]func(){
+		"namespace": func() {
+			sqlDB.Exec(t, fmt.Sprintf("CREATE DATABASE mutate_%d", mutateEverySystemTableCounter))
+		},
+		"descriptor": func() {
+			sqlDB.Exec(t, fmt.Sprintf("ALTER TABLE defaultdb.foo ADD COLUMN e_%d STRING", mutateEverySystemTableCounter))
+		},
+		"users": func() {
+			sqlDB.Exec(t, fmt.Sprintf("CREATE USER mutate_%d", mutateEverySystemTableCounter))
+		},
+		"zones": func() {
+			var val int
+			if mutateEverySystemTableCounter%2 == 0 {
+				val = 1
+			} else {
+				val = -1
+			}
+			sqlDB.Exec(t, fmt.Sprintf(`ALTER RANGE default CONFIGURE ZONE USING gc.ttlseconds = %d`, 100+val))
+		},
+		"settings": func() {
+			changefeedbase.BatchReductionRetryEnabled.Override(ctx, &settings.SV, !changefeedbase.BatchReductionRetryEnabled.Get(&settings.SV))
+		},
+		"tenants": func() {}, // TODO?
+		"lease":   func() {}, // TODO?
+		"eventlog": func() {
+			// TODO: better way?
+			sqlDB.Exec(t, fmt.Sprintf(`INSERT INTO system.eventlog (timestamp, eventType, targetID, reportingID, info) VALUES (NOW(), 'testmutatesys', %d, %d, 'test')`, mutateEverySystemTableCounter, mutateEverySystemTableCounter))
+		},
+		"rangelog": func() {
+			// ditto
+			sqlDB.Exec(t, fmt.Sprintf(`INSERT INTO system.rangelog (timestamp, rangeID, storeID, eventType, otherRangeID, otherStoreID, info) VALUES (NOW(), %d, 1, 'testmutatesys', 0, 0, 'test')`, mutateEverySystemTableCounter))
+		},
+		"ui": func() {}, // TODO: POST /_admin/v1/uidata -d'{"key_values":{ "key1": "base64_encoded_value1"}, ..}'
+		"jobs": func() {
+			sqlDB.Exec(t, fmt.Sprintf("CREATE STATISTICS s_%d FROM defaultdb.foo", mutateEverySystemTableCounter))
+		},
+		"web_sessions": func() {}, // TODO
+		"table_statistics": func() {
+			sqlDB.Exec(t, fmt.Sprintf("CREATE STATISTICS s_%d FROM defaultdb.foo", mutateEverySystemTableCounter))
+			testutils.SucceedsSoon(t, func() error {
+				status := sqlDB.QueryStr(t, `select status from [show jobs] where job_type = 'CREATE STATS' order by created desc limit 1`)[0][0]
+				if status == "succeeded" {
+					return nil
+				}
+				return errors.New("waiting for job to complete")
+			})
+		},
+		"locations": func() {
+			sqlDB.Exec(t, fmt.Sprintf("INSERT INTO system.locations VALUES ('region', 'us-east-%d', 37.478397, -76.453077)", mutateEverySystemTableCounter))
+		},
+		"role_members": func() {
+			sqlDB.Exec(t, "CREATE ROLE IF NOT EXISTS mutest WITH CONTROLJOB;")
+			if mutateEverySystemTableCounter%2 == 0 {
+				sqlDB.Exec(t, "GRANT mutest TO testuser")
+			} else {
+				sqlDB.Exec(t, "REVOKE mutest FROM testuser")
+			}
+		},
+		"comments": func() {
+			sqlDB.Exec(t, fmt.Sprintf("COMMENT ON TABLE defaultdb.foo IS 'test%d'", mutateEverySystemTableCounter))
+		},
+		"reports_meta": func() {
+			sqlDB.Exec(t, fmt.Sprintf("INSERT INTO system.reports_meta (id, generated) VALUES (%d, NOW())", mutateEverySystemTableCounter))
+		},
+		"replication_constraint_stats":    func() {}, // TODO
+		"replication_critical_localities": func() {}, // TODO
+		"replication_stats":               func() {}, // TODO
+		"protected_ts_meta":               func() {}, // TODO
+		"protected_ts_records":            func() {}, // TODO
+		"role_options": func() {
+			sqlDB.Exec(t, "CREATE ROLE IF NOT EXISTS mutest WITH CONTROLJOB;")
+			sqlDB.Exec(t, fmt.Sprintf("ALTER ROLE mutest WITH WITH LOGIN PASSWORD 'mut-%d'", mutateEverySystemTableCounter))
+		},
+		"statement_bundle_chunks":        func() {}, // TODO
+		"statement_diagnostics_requests": func() {}, // TODO
+		"statement_diagnostics":          func() {}, // TODO
+		"scheduled_jobs":                 func() {}, // TODO
+		"sqlliveness":                    func() {}, // TODO
+		"migrations":                     func() {}, // TODO
+		"join_tokens":                    func() {}, // TODO
+		"statement_statistics":           func() {}, // TODO
+		"transaction_statistics":         func() {}, // TODO
+		"statement_activity":             func() {}, // TODO
+		"transaction_activity":           func() {}, // TODO
+		"database_role_settings":         func() {}, // TODO
+		"tenant_usage":                   func() {}, // TODO
+		"sql_instances":                  func() {}, // TODO
+		"span_configurations":            func() {}, // TODO
+		"task_payloads":                  func() {}, // TODO
+		"tenant_settings":                func() {}, // TODO
+		"tenant_tasks":                   func() {}, // TODO
+		"span_count":                     func() {}, // TODO
+		"privileges":                     func() {}, // TODO
+		"external_connections":           func() {}, // TODO
+		"job_info":                       func() {}, // TODO
+		"span_stats_unique_keys":         func() {}, // TODO
+		"span_stats_buckets":             func() {}, // TODO
+		"span_stats_samples":             func() {}, // TODO
+		"span_stats_tenant_boundaries":   func() {}, // TODO
+		"region_liveness":                func() {}, // TODO
+		"mvcc_statistics":                func() {}, // TODO
+		"statement_execution_insights":   func() {}, // TODO
+		"transaction_execution_insights": func() {}, // TODO
+		"table_metadata":                 func() {}, // TODO
+	}
+
+	for _, tab := range systemschema.MakeSystemTables() {
+		if tab.IsVirtualTable() || tab.IsSequence() {
+			continue
+		}
+		mutation, ok := knownTableMutations[tab.GetName()]
+		if !ok {
+			t.Fatalf("no mutation for %s", tab.GetName())
+		}
+		mutation()
+	}
+}
+
 func fetchRoleMembers(
 	ctx context.Context, execCfg *sql.ExecutorConfig, ts hlc.Timestamp,
 ) ([][]string, error) {
@@ -710,4 +951,43 @@ func fetchRoleMembers(
 		return nil, err
 	}
 	return roleMembers, nil
+}
+
+// TODO: replace the inline versions of these above with calls to these.
+func refreshPTSReaderCache(t *testing.T, ctx context.Context, s serverutils.TestServerInterface, asOf hlc.Timestamp, dbName, tableName string) {
+	tableID, err := s.QueryTableID(ctx, username.RootUserName(), dbName, tableName)
+	require.NoError(t, err)
+	tableKey := s.Codec().TablePrefix(uint32(tableID))
+	store, err := s.StorageLayer().GetStores().(*kvserver.Stores).GetStore(s.GetFirstStoreID())
+	require.NoError(t, err)
+	var repl *kvserver.Replica
+	testutils.SucceedsSoon(t, func() error {
+		repl = store.LookupReplica(roachpb.RKey(tableKey))
+		if repl == nil {
+			return errors.New("could not find replica")
+		}
+		return nil
+	})
+	ptsReader := store.GetStoreConfig().ProtectedTimestampReader
+	require.NoError(
+		t,
+		spanconfigptsreader.TestingRefreshPTSState(ctx, t, ptsReader, asOf),
+	)
+	require.NoError(t, repl.ReadProtectedTimestampsForTesting(ctx))
+}
+
+var mvccGCEventLogTraceRx = regexp.MustCompile(` NumKeysAffected:([0-9]+) `)
+
+func gcTestTableRange(t *testing.T, ctx context.Context, s serverutils.TestServerInterface, sqlDB *sqlutils.SQLRunner, dbName, tableName string, now hlc.Timestamp) {
+	row := sqlDB.QueryRow(t, fmt.Sprintf("SELECT range_id FROM [SHOW RANGES FROM TABLE %s.%s]", dbName, tableName))
+	var rangeID int64
+	row.Scan(&rangeID)
+	refreshPTSReaderCache(t, ctx, s, now, dbName, tableName)
+	trace := sqlDB.QueryStr(t, `SELECT crdb_internal.kv_enqueue_replica($1, 'mvccGC', true, true)`, rangeID)[0][0]
+	numKeysAffectedStr := mvccGCEventLogTraceRx.FindStringSubmatch(trace)[1]
+	numKeysAffected, err := strconv.Atoi(numKeysAffectedStr)
+	require.NoError(t, err)
+	if numKeysAffected > 0 {
+		t.Logf("%s.%s: %d keys GC'd", dbName, tableName, numKeysAffected)
+	}
 }

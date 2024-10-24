@@ -43,11 +43,14 @@ func createProtectedTimestampRecord(
 // that need to be protected to ensure that a CHANGEFEED can do a
 // historical read of a table descriptor.
 var systemTablesToProtect = []descpb.ID{
+	// manually validated
 	keys.DescriptorTableID,
-	keys.CommentsTableID,
 	keys.ZonesTableID,
-	// Required for CDC Queries.
-	keys.RoleMembersTableID,
+	keys.CommentsTableID,
+
+	// TODO: this one doesn't seem to pop with current testing
+	// // Required for CDC Queries.
+	// keys.RoleMembersTableID,
 	// TODO(#128806): identify and add any more required tables (such as, possibly, `keys.UsersTableID`)
 }
 

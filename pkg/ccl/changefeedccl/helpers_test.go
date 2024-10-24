@@ -1185,7 +1185,7 @@ func maybeUseExternalConnection(
 ) cdctest.TestFeedFactory {
 	// percentExternal is the chance of randomly running a test using an `external://` uri.
 	// Set to 1 to always do this.
-	const percentExternal = 0.5
+	const percentExternal = 1
 	if sinkType == `sinkless` || sinkType == `enterprise` || sinkType == `pulsar` || strings.Contains(flakyWhenExternalConnection, sinkType) ||
 		options.forceNoExternalConnectionURI || rand.Float32() > percentExternal {
 		return factory
