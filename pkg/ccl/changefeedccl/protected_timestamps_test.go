@@ -903,9 +903,14 @@ func mutateEverySystemTable(t *testing.T, ctx context.Context, sqlDB *sqlutils.S
 		"statement_bundle_chunks":        func() {}, // TODO
 		"statement_diagnostics_requests": func() {}, // TODO
 		"statement_diagnostics":          func() {}, // TODO
-		"scheduled_jobs":                 func() {}, // TODO
-		"sqlliveness":                    func() {}, // TODO
-		"migrations":                     func() {}, // TODO
+		"scheduled_jobs": func() {
+			// TODO: this hangs. why?
+			// sqlDB.Exec(t, fmt.Sprintf(`CREATE SCHEDULE mutest%d FOR CHANGEFEED defaultdb.foo INTO 'null://' RECURRING '@daily' WITH SCHEDULE OPTIONS first_run='2099-01-01T00:00:00'`, mutateEverySystemTableCounter))
+		},
+		"sqlliveness": func() {}, // TODO
+		"migrations": func() {
+			sqlDB.Exec(t, "INSERT INTO system.migrations (major,minor,patch,internal, completed_at) VALUES (0, 0, 0, $1, NOW())", mutateEverySystemTableCounter+10)
+		},
 		"join_tokens":                    func() {}, // TODO
 		"statement_statistics":           func() {}, // TODO
 		"transaction_statistics":         func() {}, // TODO
