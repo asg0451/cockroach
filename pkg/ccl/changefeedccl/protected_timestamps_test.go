@@ -745,7 +745,7 @@ func TestChangefeedProtectsAllTablesItNeeds(t *testing.T) {
 
 		t.Logf("Starting changefeed")
 		// feed := feed(t, f, `CREATE CHANGEFEED FOR defaultdb.foo WITH resolved = '20ms'`)
-		// TODO: query fns?
+		// TODO: add more query fns randomizedly?
 		feed := feed(t, f, `CREATE CHANGEFEED WITH schema_change_policy='nobackfill' AS SELECT * FROM defaultdb.foo`)
 		defer closeFeed(t, feed)
 		jobFeed := feed.(cdctest.EnterpriseTestFeed)
@@ -829,6 +829,7 @@ func mutateEverySystemTable(t *testing.T, ctx context.Context, sqlDB *sqlutils.S
 	defer func() { mutateEverySystemTableCounter++ }()
 	knownTableMutations := map[string]func(){
 		"namespace": func() {
+			// TODO: alter defaultdb in some way?
 			sqlDB.Exec(t, fmt.Sprintf("CREATE DATABASE mutate_%d", mutateEverySystemTableCounter))
 		},
 		"descriptor": func() {
@@ -899,6 +900,7 @@ func mutateEverySystemTable(t *testing.T, ctx context.Context, sqlDB *sqlutils.S
 		"role_options": func() {
 			sqlDB.Exec(t, "CREATE ROLE IF NOT EXISTS mutest WITH CONTROLJOB;")
 			sqlDB.Exec(t, fmt.Sprintf("ALTER ROLE mutest WITH LOGIN PASSWORD 'mut-%d'", mutateEverySystemTableCounter))
+			sqlDB.Exec(t, fmt.Sprintf("ALTER ROLE enterprisefeeduser WITH VALID UNTIL '%v'", timeutil.Now().Add(time.Duration(24*int64(mutateEverySystemTableCounter+1)*int64(time.Hour))).Format(time.RFC3339)))
 		},
 		"statement_bundle_chunks":        func() {}, // TODO
 		"statement_diagnostics_requests": func() {}, // TODO
