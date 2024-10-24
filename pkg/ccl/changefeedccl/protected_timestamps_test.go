@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"sort"
 	"strconv"
 	"sync/atomic"
 	"testing"
@@ -699,6 +700,7 @@ func TestChangefeedProtectsAllTablesItNeeds(t *testing.T) {
 			context.Background(), &s.Server.ClusterSettings().SV, ptsInterval)
 
 		sqlDB := sqlutils.MakeSQLRunner(s.SystemServer.SQLConn(t))
+
 		// sqlDB := sqlutils.MakeSQLRunner(s.DB) ?
 		// for tenant stuff -- sysDB := sqlutils.MakeSQLRunner(s.SystemServer.SQLConn(t))
 
@@ -710,13 +712,32 @@ func TestChangefeedProtectsAllTablesItNeeds(t *testing.T) {
 		sqlDB.Exec(t, `CREATE USER testuser`)
 		sqlDB.Exec(t, `GRANT admin TO enterprisefeeduser`) // TODO: why is this necessary? and does it mess up our testing?
 
+		// Get the ids and names of system tables for better errors if we fail.
+		tableIdInfo := make(map[string]struct{ keyStart, name string })
+		tableIdInfoStr := sqlDB.QueryStr(t, "select start_key, table_id, table_name from [show ranges from database system with tables]")
+		for _, row := range tableIdInfoStr {
+			tableIdInfo[row[1]] = struct{ keyStart, name string }{row[0], row[2]}
+		}
 		fooDescr := cdctest.GetHydratedTableDescriptor(t, s.Server.ExecutorConfig(), "defaultdb", "foo")
-		var targets changefeedbase.Targets
-		targets.Add(changefeedbase.Target{TableID: fooDescr.GetID()})
+		tableIdInfo[strconv.FormatInt(int64(fooDescr.GetID()), 10)] = struct{ keyStart, name string }{"idk", "foo"}
+		t.Cleanup(func() {
+			if t.Failed() {
+				t.Logf("system table info:")
+				sorted := make([]string, 0, len(tableIdInfo))
+				for id := range tableIdInfo {
+					sorted = append(sorted, id)
+				}
+				sort.Strings(sorted)
+				for _, id := range sorted {
+					info := tableIdInfo[id]
+					t.Logf("%s:\t%s\t%s", id, info.keyStart, info.name)
+				}
+			}
+		})
 
 		t.Logf("Creating starting state")
-		// mutateEverySystemTable(t, ctx, sqlDB, s.Server.ClusterSettings())
-		sqlDB.Exec(t, `GRANT admin TO testuser`)
+		mutateEverySystemTable(t, ctx, sqlDB, s.Server.ClusterSettings())
+		// sqlDB.Exec(t, `GRANT admin TO testuser`)
 		sqlDB.Exec(t, "INSERT INTO defaultdb.foo (a, b) VALUES (1, 'first val')")
 
 		// asOfTs := s.Server.Clock().Now()
@@ -725,7 +746,7 @@ func TestChangefeedProtectsAllTablesItNeeds(t *testing.T) {
 		t.Logf("Starting changefeed")
 		// feed := feed(t, f, `CREATE CHANGEFEED FOR defaultdb.foo WITH resolved = '20ms'`)
 		// TODO: query fns?
-		feed := feed(t, f, `CREATE CHANGEFEED AS SELECT * FROM defaultdb.foo`)
+		feed := feed(t, f, `CREATE CHANGEFEED WITH schema_change_policy='nobackfill' AS SELECT * FROM defaultdb.foo`)
 		defer closeFeed(t, feed)
 		jobFeed := feed.(cdctest.EnterpriseTestFeed)
 
@@ -749,15 +770,15 @@ func TestChangefeedProtectsAllTablesItNeeds(t *testing.T) {
 		require.NoError(t, jobFeed.Pause())
 
 		t.Logf("Overwriting table data to cause expiry")
-		// mutateEverySystemTable(t, ctx, sqlDB, s.Server.ClusterSettings())
+		mutateEverySystemTable(t, ctx, sqlDB, s.Server.ClusterSettings())
 		// - foo
 		sqlDB.Exec(t, "UPDATE defaultdb.foo SET b = 'second val' WHERE a = 1")
-		// - system.descriptor
-		sqlDB.Exec(t, "ALTER TABLE defaultdb.foo ADD COLUMN c STRING")
-		sqlDB.Exec(t, "ALTER TABLE defaultdb.foo ADD COLUMN d STRING")
-		// - system.role_members.
-		sqlDB.Exec(t, "REVOKE admin FROM testuser")
-		// TODO: do something that affects every system table.
+		// // - system.descriptor
+		// sqlDB.Exec(t, "ALTER TABLE defaultdb.foo ADD COLUMN c STRING")
+		// sqlDB.Exec(t, "ALTER TABLE defaultdb.foo ADD COLUMN d STRING")
+		// // - system.role_members.
+		// sqlDB.Exec(t, "REVOKE admin FROM testuser")
+		// // TODO: do something that affects every system table.
 
 		time.Sleep(2 * time.Second)
 
@@ -778,16 +799,18 @@ func TestChangefeedProtectsAllTablesItNeeds(t *testing.T) {
 		require.Equal(t, jobs.StatusRunning, jobs.Status(status))
 
 		t.Logf("Waiting for feed to catch up")
-		assertPayloads(t, feed, []string{
-			`foo: [1]->{"a": 1, "b": "first val"}`,
-			`foo: [1]->{"a": 1, "b": "second val"}`,
-		})
+
+		// The message may have other fields on it now as a result of the
+		// mutations, so just check that the value's in there somewhere.
+		msgs, err := readNextMessages(ctx, feed, 2)
+		require.NoError(t, err)
+		require.Contains(t, string(msgs[0].Value), "first val")
+		require.Contains(t, string(msgs[1].Value), "second val")
 
 		t.Logf("Is it still running?")
 		sqlDB.Exec(t, "UPDATE defaultdb.foo SET b = 'third val' WHERE a = 1")
-		// The message will have other fields on it now as a result of the
-		// mutations, so just check that the value's in there somewhere.
-		msgs, err := readNextMessages(ctx, feed, 1)
+
+		msgs, err = readNextMessages(ctx, feed, 1)
 		require.NoError(t, err)
 		require.Contains(t, string(msgs[0].Value), "third val")
 
@@ -830,11 +853,11 @@ func mutateEverySystemTable(t *testing.T, ctx context.Context, sqlDB *sqlutils.S
 		"lease":   func() {}, // TODO?
 		"eventlog": func() {
 			// TODO: better way?
-			sqlDB.Exec(t, fmt.Sprintf(`INSERT INTO system.eventlog (timestamp, eventType, targetID, reportingID, info) VALUES (NOW(), 'testmutatesys', %d, %d, 'test')`, mutateEverySystemTableCounter, mutateEverySystemTableCounter))
+			sqlDB.Exec(t, fmt.Sprintf(`INSERT INTO system.eventlog (timestamp, "eventType", "targetID", "reportingID", info) VALUES (NOW(), 'testmutatesys', %d, %d, 'test')`, mutateEverySystemTableCounter, mutateEverySystemTableCounter))
 		},
 		"rangelog": func() {
 			// ditto
-			sqlDB.Exec(t, fmt.Sprintf(`INSERT INTO system.rangelog (timestamp, rangeID, storeID, eventType, otherRangeID, otherStoreID, info) VALUES (NOW(), %d, 1, 'testmutatesys', 0, 0, 'test')`, mutateEverySystemTableCounter))
+			sqlDB.Exec(t, fmt.Sprintf(`INSERT INTO system.rangelog (timestamp, "rangeID", "storeID", "eventType", "otherRangeID", info) VALUES (NOW(), %d, 1, 'testmutatesys', 0, 'test')`, mutateEverySystemTableCounter))
 		},
 		"ui": func() {}, // TODO: POST /_admin/v1/uidata -d'{"key_values":{ "key1": "base64_encoded_value1"}, ..}'
 		"jobs": func() {
@@ -852,7 +875,7 @@ func mutateEverySystemTable(t *testing.T, ctx context.Context, sqlDB *sqlutils.S
 			})
 		},
 		"locations": func() {
-			sqlDB.Exec(t, fmt.Sprintf("INSERT INTO system.locations VALUES ('region', 'us-east-%d', 37.478397, -76.453077)", mutateEverySystemTableCounter))
+			sqlDB.Exec(t, fmt.Sprintf(`INSERT INTO system.locations ("localityKey", "localityValue",latitude,longitude) VALUES ('region', 'us-east-%d', 37.478397, -76.453077)`, mutateEverySystemTableCounter))
 		},
 		"role_members": func() {
 			sqlDB.Exec(t, "CREATE ROLE IF NOT EXISTS mutest WITH CONTROLJOB;")
@@ -875,7 +898,7 @@ func mutateEverySystemTable(t *testing.T, ctx context.Context, sqlDB *sqlutils.S
 		"protected_ts_records":            func() {}, // TODO
 		"role_options": func() {
 			sqlDB.Exec(t, "CREATE ROLE IF NOT EXISTS mutest WITH CONTROLJOB;")
-			sqlDB.Exec(t, fmt.Sprintf("ALTER ROLE mutest WITH WITH LOGIN PASSWORD 'mut-%d'", mutateEverySystemTableCounter))
+			sqlDB.Exec(t, fmt.Sprintf("ALTER ROLE mutest WITH LOGIN PASSWORD 'mut-%d'", mutateEverySystemTableCounter))
 		},
 		"statement_bundle_chunks":        func() {}, // TODO
 		"statement_diagnostics_requests": func() {}, // TODO
