@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"net/url"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/ccl/backupccl/backupresolver"
@@ -1298,12 +1297,13 @@ func (b *changefeedResumer) resumeWithRetries(
 
 		// Terminate changefeed if needed.
 		if err := changefeedbase.AsTerminalError(ctx, jobExec.ExecCfg().LeaseManager, flowErr); err != nil {
-			deets := errors.GetAllSafeDetails(err)
-			var deetsStrs []string
-			for _, d := range deets {
-				deetsStrs = d.Fill(deetsStrs)
+			// get error type tree
+			var typs []string
+			for err := errors.Unwrap(err); err != nil; err = errors.Unwrap(err) {
+				typs = append(typs, fmt.Sprintf("%T", err))
 			}
-			log.Infof(ctx, "CHANGEFEED %d shutting down (cause: %v) (details: %s)", jobID, err, strings.Join(deetsStrs, "| "))
+
+			log.Infof(ctx, "CHANGEFEED %d shutting down (cause: %v) (types: %+#v)", jobID, err, typs)
 			// Best effort -- update job status to make it clear why changefeed shut down.
 			// This won't always work if this node is being shutdown/drained.
 			if ctx.Err() == nil {

@@ -707,7 +707,9 @@ func TestChangefeedProtectsAllTablesItNeeds(t *testing.T) {
 		sqlDB.Exec(t, "SET CLUSTER SETTING kv.protectedts.poll_interval = '10ms'")
 		sqlDB.Exec(t, "SET CLUSTER SETTING kv.closed_timestamp.target_duration = '100ms'")
 		sqlDB.Exec(t, "SET CLUSTER SETTING kv.rangefeed.closed_timestamp_refresh_interval = '0s'")
+		// sqlDB.Exec(t, "SET CLUSTER SETTING server.authentication_cache.enabled = false") // Disable auth cache so we hit tables more often.
 		sqlDB.Exec(t, `ALTER DATABASE system CONFIGURE ZONE USING gc.ttlseconds = 1`)
+		sqlDB.Exec(t, `ALTER DATABASE defaultdb CONFIGURE ZONE USING gc.ttlseconds = 1`)
 		sqlDB.Exec(t, "CREATE TABLE defaultdb.foo (a INT PRIMARY KEY, b STRING)")
 		sqlDB.Exec(t, `CREATE USER testuser`)
 		sqlDB.Exec(t, `GRANT admin TO enterprisefeeduser`) // TODO: why is this necessary? and does it mess up our testing?
@@ -736,6 +738,7 @@ func TestChangefeedProtectsAllTablesItNeeds(t *testing.T) {
 		})
 
 		t.Logf("Creating starting state")
+		// TODO: dtaylor says we don't need to do this, but without it Users doesn't fail
 		mutateEverySystemTable(t, ctx, sqlDB, s.Server.ClusterSettings())
 		// sqlDB.Exec(t, `GRANT admin TO testuser`)
 		sqlDB.Exec(t, "INSERT INTO defaultdb.foo (a, b) VALUES (1, 'first val')")
@@ -827,6 +830,7 @@ var mutateEverySystemTableCounter int
 // assumes: defaultdb.foo, gc.ttlseconds = 100, testuser
 func mutateEverySystemTable(t *testing.T, ctx context.Context, sqlDB *sqlutils.SQLRunner, settings *cluster.Settings) {
 	defer func() { mutateEverySystemTableCounter++ }()
+
 	knownTableMutations := map[string]func(){
 		"namespace": func() {
 			// TODO: alter defaultdb in some way?
@@ -939,17 +943,39 @@ func mutateEverySystemTable(t *testing.T, ctx context.Context, sqlDB *sqlutils.S
 		"transaction_execution_insights": func() {}, // TODO
 		"table_metadata":                 func() {}, // TODO
 	}
+	_ = knownTableMutations
+
+	// current situation:
+	// for descriptor, zones, comments -- we don't really need to do anything special here
+	// for role_members and users however, i'm unable to get them to fail with BatchTimestampBeforeGCError without running all the mutations above
+	// i've tried:
+	// - making and calling a function to do a no-op schema change on each system table
+	// - creating a user
+	// - altering a role
+	// - disabling the auth cache with server.authentication_cache.enabled = false
 
 	for _, tab := range systemschema.MakeSystemTables() {
 		if tab.IsVirtualTable() || tab.IsSequence() {
 			continue
 		}
+
+		// i added this sql function which should bust the auth cache.
+		// theoretically this should work by itself, but it doesn't do the job
+		// sqlDB.Exec(t, fmt.Sprintf("SELECT crdb_internal.noop_schema_change('system', 'public', '%s')", tab.GetName()))
+
+		// doing all of the above mutations do work
 		mutation, ok := knownTableMutations[tab.GetName()]
 		if !ok {
 			t.Fatalf("no mutation for %s", tab.GetName())
 		}
 		mutation()
 	}
+
+	// this by itself should theoretically also do the job for `users` but it doesnt
+	// sqlDB.Exec(t, fmt.Sprintf("CREATE USER mutate_%d", mutateEverySystemTableCounter+10))
+
+	// what about this? nope.
+	// sqlDB.Exec(t, fmt.Sprintf("ALTER ROLE enterprisefeeduser WITH VALID UNTIL '%v'", timeutil.Now().Add(time.Duration(24*int64(mutateEverySystemTableCounter+10)*int64(time.Hour))).Format(time.RFC3339)))
 }
 
 func fetchRoleMembers(

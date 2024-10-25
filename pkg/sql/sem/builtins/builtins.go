@@ -42,10 +42,12 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/appstatspb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/randgen/randgencfg"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/lex"
 	"github.com/cockroachdb/cockroach/pkg/sql/lexbase"
@@ -8005,6 +8007,47 @@ specified store on the node it's run from. One of 'mvccGC', 'merge', 'split',
 		makeRequestStatementBundleBuiltinOverload(false /* withPlanGist */, false /* withAntiPlanGist */, true /* redacted */),
 		makeRequestStatementBundleBuiltinOverload(true /* withPlanGist */, false /* withAntiPlanGist */, true /* redacted */),
 		makeRequestStatementBundleBuiltinOverload(true /* withPlanGist */, true /* withAntiPlanGist */, true /* redacted */),
+	),
+	"crdb_internal.noop_schema_change": makeBuiltin(
+		tree.FunctionProperties{
+			Category:         builtinconstants.CategorySystemRepair,
+			DistsqlBlocklist: true, // applicable only on the gateway
+			Undocumented:     true,
+		},
+		tree.Overload{
+			Types: tree.ParamTypes{
+				{Name: "db_name", Typ: types.String},
+				{Name: "schema_name", Typ: types.String},
+				{Name: "table_name", Typ: types.String},
+			},
+			ReturnType: tree.FixedReturnType(types.Void),
+			Fn: func(ctx context.Context, evalCtx *eval.Context, args tree.Datums) (tree.Datum, error) {
+				type realPlanner interface {
+					ResolveMutableTableDescriptor(
+						ctx context.Context, tn *tree.TableName, required bool, requiredType tree.RequiredTableKind,
+					) (prefix catalog.ResolvedObjectPrefix, table *tabledesc.Mutable, err error)
+					WriteSchemaChangeTest(ctx context.Context, tableDesc *tabledesc.Mutable, mutationID descpb.MutationID, jobDesc string) error
+				}
+				planner := evalCtx.Planner.(realPlanner)
+				dbName := tree.Name(tree.MustBeDString(args[0]))
+				schemaName := tree.Name(tree.MustBeDString(args[1]))
+				tbName := tree.Name(tree.MustBeDString(args[2]))
+				_, tableDesc, err := planner.ResolveMutableTableDescriptor(ctx, tree.NewTableNameWithSchema(dbName, schemaName, tbName), true, tree.ResolveAnyTableKind)
+				if err != nil {
+					return nil, err
+				}
+				err = planner.WriteSchemaChangeTest(
+					ctx, tableDesc, descpb.InvalidMutationID, fmt.Sprintf("noop schema change on %s", tableDesc.Name),
+				)
+				if err != nil {
+					return nil, err
+				}
+
+				return tree.DVoidDatum, nil
+			},
+			Info:       `Perform a no-op schema change on the desired table.`,
+			Volatility: volatility.Volatile,
+		},
 	),
 
 	"crdb_internal.set_compaction_concurrency": makeBuiltin(

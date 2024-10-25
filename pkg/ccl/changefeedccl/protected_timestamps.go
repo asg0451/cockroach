@@ -48,12 +48,13 @@ var systemTablesToProtect = []descpb.ID{
 	keys.ZonesTableID,
 	keys.CommentsTableID,
 
-	// TODO: this one doesn't seem to pop every time with current testing. Need to run for longer? or more times?
-	// Required for CDC Queries.
-	keys.RoleMembersTableID,
+	// Disabled the below ones so we can see them fail in the tests
 
-	// Discovered by this testing:
-	keys.UsersTableID,
+	// Required for CDC Queries.
+	// keys.RoleMembersTableID,
+
+	// // Discovered by this testing:
+	// keys.UsersTableID,
 }
 
 func makeTargetToProtect(targets changefeedbase.Targets) *ptpb.Target {

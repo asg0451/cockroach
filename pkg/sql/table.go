@@ -249,6 +249,10 @@ func (p *planner) createOrUpdateSchemaChangeJob(
 	return nil
 }
 
+func (p *planner) WriteSchemaChangeTest(ctx context.Context, tableDesc *tabledesc.Mutable, mutationID descpb.MutationID, jobDesc string) error {
+	return p.writeSchemaChange(ctx, tableDesc, mutationID, jobDesc)
+}
+
 // writeSchemaChange effectively writes a table descriptor to the
 // database within the current planner transaction, and queues up
 // a schema changer for future processing.
@@ -259,7 +263,7 @@ func (p *planner) createOrUpdateSchemaChangeJob(
 // separate statement in the same transaction, or from updating a dependent
 // table descriptor during a schema change to another table, or from a step in a
 // larger schema change to the same table.
-func (p *planner) writeSchemaChange(
+func (p *planner) writeSchemaChange( // HERE
 	ctx context.Context, tableDesc *tabledesc.Mutable, mutationID descpb.MutationID, jobDesc string,
 ) error {
 	if !p.EvalContext().TxnImplicit {
