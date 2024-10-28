@@ -961,14 +961,14 @@ func mutateEverySystemTable(t *testing.T, ctx context.Context, sqlDB *sqlutils.S
 
 		// i added this sql function which should bust the auth cache.
 		// theoretically this should work by itself, but it doesn't do the job
-		// sqlDB.Exec(t, fmt.Sprintf("SELECT crdb_internal.noop_schema_change('system', 'public', '%s')", tab.GetName()))
+		sqlDB.Exec(t, fmt.Sprintf("SELECT crdb_internal.noop_schema_change('system', 'public', '%s')", tab.GetName()))
 
 		// doing all of the above mutations do work
-		mutation, ok := knownTableMutations[tab.GetName()]
-		if !ok {
-			t.Fatalf("no mutation for %s", tab.GetName())
-		}
-		mutation()
+		// mutation, ok := knownTableMutations[tab.GetName()]
+		// if !ok {
+		// 	t.Fatalf("no mutation for %s", tab.GetName())
+		// }
+		// mutation()
 	}
 
 	// this by itself should theoretically also do the job for `users` but it doesnt
