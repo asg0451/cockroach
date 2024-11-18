@@ -244,7 +244,7 @@ func (ct *cdcTester) setupSink(args feedArgs) string {
 	case kafkaSink:
 		kafka, _ := setupKafka(ct.ctx, ct.t, ct.cluster, ct.sinkNodes)
 		kafka.mon = ct.mon
-		kafka.validateOrder = args.kafkaArgs.validateOrder
+		kafka.noValidateCorrectness = args.noValidateCorrectness
 
 		if err := kafka.startTopicConsumers(ct.ctx, args.targets, ct.doneCh); err != nil {
 			ct.t.Fatal(err)
@@ -523,6 +523,8 @@ type feedArgs struct {
 	sinkURIOverride string
 	cdcFeatureFlags
 	kafkaArgs kafkaFeedArgs
+
+	noValidateCorrectness bool
 }
 
 // kafkaFeedArgs are args that are specific to kafkaSink changefeeds.
@@ -530,9 +532,6 @@ type kafkaFeedArgs struct {
 	// If kafkaChaos is true, the Kafka cluster will periodically restart
 	// to simulate unreliability.
 	kafkaChaos bool
-	// If validateOrder is set to true, order validators will be created
-	// for each topic to validate the changefeed's ordering guarantees.
-	validateOrder bool
 }
 
 func (ct *cdcTester) newChangefeed(args feedArgs) changefeedJob {
@@ -559,7 +558,7 @@ func (ct *cdcTester) newChangefeed(args feedArgs) changefeedJob {
 	} else {
 		feedOptions["resolved"] = ""
 	}
-	if args.kafkaArgs.validateOrder {
+	if !args.noValidateCorrectness {
 		feedOptions["updated"] = ""
 	}
 
@@ -1429,10 +1428,7 @@ func registerCDC(r registry.Registry) {
 			feed := ct.newChangefeed(feedArgs{
 				sinkType: kafkaSink,
 				targets:  allTpccTargets,
-				kafkaArgs: kafkaFeedArgs{
-					validateOrder: true,
-				},
-				opts: map[string]string{"initial_scan": "'no'"},
+				opts:     map[string]string{"initial_scan": "'no'"},
 			})
 			ct.runFeedLatencyVerifier(feed, latencyTargets{
 				initialScanLatency: 3 * time.Minute,
@@ -1644,8 +1640,7 @@ func registerCDC(r registry.Registry) {
 				sinkType: kafkaSink,
 				targets:  allTpccTargets,
 				kafkaArgs: kafkaFeedArgs{
-					kafkaChaos:    true,
-					validateOrder: true,
+					kafkaChaos: true,
 				},
 				opts: map[string]string{"initial_scan": "'no'"},
 			})
@@ -1677,8 +1672,7 @@ func registerCDC(r registry.Registry) {
 				sinkType: kafkaSink,
 				targets:  allTpccTargets,
 				kafkaArgs: kafkaFeedArgs{
-					kafkaChaos:    true,
-					validateOrder: true,
+					kafkaChaos: true,
 				},
 				opts: map[string]string{"initial_scan": "'no'"},
 			})
@@ -1720,8 +1714,7 @@ func registerCDC(r registry.Registry) {
 				sinkType: kafkaSink,
 				targets:  []string{"t"},
 				kafkaArgs: kafkaFeedArgs{
-					kafkaChaos:    true,
-					validateOrder: true,
+					kafkaChaos: true,
 				},
 				opts: map[string]string{
 					"updated":                       "",
@@ -1783,11 +1776,8 @@ func registerCDC(r registry.Registry) {
 			ct.runTPCCWorkload(tpccArgs{warehouses: 100, duration: "30m", tolerateErrors: true})
 
 			feed := ct.newChangefeed(feedArgs{
-				sinkType: kafkaSink,
-				targets:  allTpccTargets,
-				kafkaArgs: kafkaFeedArgs{
-					validateOrder: true,
-				},
+				sinkType:       kafkaSink,
+				targets:        allTpccTargets,
 				opts:           map[string]string{"initial_scan": "'no'"},
 				tolerateErrors: true,
 			})
@@ -1832,9 +1822,6 @@ func registerCDC(r registry.Registry) {
 			feed := ct.newChangefeed(feedArgs{
 				sinkType: kafkaSink,
 				targets:  allLedgerTargets,
-				kafkaArgs: kafkaFeedArgs{
-					validateOrder: true,
-				},
 			})
 			ct.runFeedLatencyVerifier(feed, latencyTargets{
 				initialScanLatency: 10 * time.Minute,
@@ -2636,9 +2623,9 @@ type kafkaManager struct {
 	// Our method of requiring OAuth on the broker only works with Kafka 2
 	useKafka2 bool
 
-	// validateOrder specifies whether consumers created by the
-	// kafkaManager should create and use order validators.
-	validateOrder bool
+	// noValidateCorrectness is used to disable correctness validation. why would
+	// you want to do this?
+	noValidateCorrectness bool
 }
 
 func (k kafkaManager) basePath() string {
@@ -3317,9 +3304,15 @@ func (k kafkaManager) newConsumer(
 	if err != nil {
 		return nil, err
 	}
-	var validator cdctest.Validator
-	if k.validateOrder {
-		validator = cdctest.NewOrderValidator(topic)
+	var validator cdctest.Validator = cdctest.NoOpValidator
+	if !k.noValidateCorrectness {
+		orderValidator := cdctest.NewOrderValidator(topic)
+		var db *gosql.DB
+		fpValidator, err := cdctest.NewFingerprintValidator(db, origTable, fprintTable, parts, maxCols)
+		if err != nil {
+			return nil, err
+		}
+		validator = cdctest.Validators([]cdctest.Validator{orderValidator, fpValidator})
 	}
 	tc, err := newTopicConsumer(k.t, consumer, topic, validator, stopper)
 	if err != nil {
