@@ -3308,7 +3308,7 @@ func (k kafkaManager) newConsumer(
 	if !k.noValidateCorrectness {
 		orderValidator := cdctest.NewOrderValidator(topic)
 		var db *gosql.DB
-		fpValidator, err := cdctest.NewFingerprintValidator(db, origTable, fprintTable, parts, maxCols)
+		fpValidator, err := cdctest.NewFingerprintValidator(db, origTable, "roachtest_kafka_fprint", parts, maxCols)
 		if err != nil {
 			return nil, err
 		}
