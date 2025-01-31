@@ -1300,7 +1300,7 @@ func TestChangefeedRandomExpressions(t *testing.T) {
 			for i, id := range expectedRowIDs {
 				assertedPayloads[i] = fmt.Sprintf(`seed: [%s]->{"rowid": %s}`, id, id)
 			}
-			err = assertPayloadsBaseErr(context.Background(), seedFeed, assertedPayloads, false, false)
+			err = assertPayloadsBaseErr(context.Background(), seedFeed, assertedPayloads, false, false, changefeedbase.OptEnvelopeWrapped)
 			closeFeedIgnoreError(t, seedFeed)
 			if err != nil {
 				// Skip errors that may come up during SQL execution. If the SQL query
@@ -3858,9 +3858,20 @@ func TestChangefeedEnriched(t *testing.T) {
 		foo := feed(t, f, `CREATE CHANGEFEED FOR foo WITH envelope=enriched`)
 		// The feed should allow this configuration.
 		defer closeFeed(t, foo)
-		// TODO(#139660): assert messages once this envelope type is integrated into the test suite.
+		// TODO: webhook events have the topic and key in the value, so we can't assert on them currently until we implement those.
+		if _, ok := foo.(*webhookFeed); ok {
+			assertPayloadsEnvelopeStripTs(t, foo, changefeedbase.OptEnvelopeEnriched, []string{
+				`: null->{"payload": {"after": {"a": 0, "b": "dog"}, "op": "c"}}`,
+			})
+		} else {
+			assertPayloadsEnvelopeStripTs(t, foo, changefeedbase.OptEnvelopeEnriched, []string{
+				// NOTE: The fully-filled in format will look like this, when we've implemented support for all the options and the schema:
+				// {"schema": {..}, "payload": { "before": {..}, "after": {..}, "source": {..}, "op": "..", "key": [...], "ts_ns": ... } }
+				`foo: [0]->{"payload": {"after": {"a": 0, "b": "dog"}, "op": "c"}}`,
+			})
+		}
 	}
-	supportedSinks := []string{"webhook", "kafka", "pubsub", "sinkless", "webhook"}
+	supportedSinks := []string{"kafka", "pubsub", "sinkless", "webhook"}
 	for _, sink := range supportedSinks {
 		cdcTest(t, testFn, feedTestForceSink(sink))
 	}
@@ -9071,7 +9082,7 @@ func TestChangefeedTestTimesOut(t *testing.T) {
 					nada, expectTimeout,
 					func(ctx context.Context) error {
 						return assertPayloadsBaseErr(
-							ctx, nada, []string{`nada: [2]->{"after": {}}`}, false, false)
+							ctx, nada, []string{`nada: [2]->{"after": {}}`}, false, false, changefeedbase.OptEnvelopeWrapped)
 					})
 				return nil
 			}, 20*expectTimeout))
