@@ -229,7 +229,10 @@ func (e *versionEncoder) makeKeySchema(
 		return nil, err
 	}
 
-	j := schema.AsJSON()
+	j, err := schema.AsJSON()
+	if err != nil {
+		return nil, err
+	}
 	e.keySchemaCache.Add(cacheKey, j)
 	return j, nil
 }
@@ -618,7 +621,10 @@ func (e *jsonEncoder) makeValueSchema(updated, prev cdcevent.Row) (json.JSON, er
 		source, _ = ptr(e.enrichedEnvelopeSourceProvider.KafkaConnectJSONSchema(), nil)
 	}
 
-	envelope := kcjsonschema.NewEnrichedEnvelope(before, after, source).AsJSON()
+	envelope, err := kcjsonschema.NewEnrichedEnvelope(before, after, source).AsJSON()
+	if err != nil {
+		return nil, err
+	}
 
 	e.valueSchemaCache.Add(ck, envelope)
 	return envelope, nil
@@ -666,6 +672,7 @@ func (e *jsonEncoder) initEnrichedEnvelope(ctx context.Context) error {
 		}
 
 		if e.keyInValue {
+			// ?
 			if err := ve.encodeKeyInValue(ctx, updated, payloadBuilder); err != nil {
 				return nil, err
 			}

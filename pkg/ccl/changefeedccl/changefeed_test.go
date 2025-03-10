@@ -3922,6 +3922,19 @@ func TestChangefeedEnriched(t *testing.T) {
 		"type":     "struct",
 	}
 
+	afterSchemaWithKeyInValue := map[string]any{
+		"name":  "foo.after.value",
+		"field": "after",
+		"fields": []map[string]any{
+			{"field": "a", "optional": false, "type": "int64"},
+			{"field": "b", "optional": true, "type": "string"},
+			{"field": "key", "optional": false, "type": keySchema},
+		},
+		"optional": false,
+		"type":     "struct",
+	}
+	_ = afterSchemaWithKeyInValue
+
 	payload := map[string]any{
 		"after": afterVal,
 		"op":    "c",
@@ -3939,7 +3952,8 @@ func TestChangefeedEnriched(t *testing.T) {
 	var sourceMap map[string]any
 	require.NoError(t, gojson.Unmarshal([]byte(source.String()), &sourceMap))
 
-	sourceSchema := esp.KafkaConnectJSONSchema().AsJSON()
+	sourceSchema, err := esp.KafkaConnectJSONSchema().AsJSON()
+	require.NoError(t, err)
 	var sourceSchemaMap map[string]any
 	require.NoError(t, gojson.Unmarshal([]byte(sourceSchema.String()), &sourceSchemaMap))
 	sourceSchemaMap["field"] = "source"
@@ -3953,6 +3967,7 @@ func TestChangefeedEnriched(t *testing.T) {
 		messageWithoutSource map[string]any
 		withSource           bool
 		expectedKey          map[string]any
+		keyInValue           bool
 	}{
 		{
 			name:                 "with nothing",
@@ -4010,6 +4025,31 @@ func TestChangefeedEnriched(t *testing.T) {
 				"schema":  keySchema,
 			},
 		},
+		// {
+		// 	name:               "with schema and source and key_in_value",
+		// 	enrichedProperties: []string{"schema", "source"},
+		// 	keyInValue:         true,
+		// 	messageWithoutSource: map[string]any{
+		// 		"payload": payload,
+		// 		"schema": map[string]any{
+		// 			"name":     "cockroachdb.envelope",
+		// 			"optional": false,
+		// 			"fields": []map[string]any{
+		// 				// afterSchemaWithKeyInValue,
+		// 				afterSchema,
+		// 				sourceSchemaMap,
+		// 				tsNsSchema,
+		// 				opSchema,
+		// 			},
+		// 			"type": "struct",
+		// 		},
+		// 	},
+		// 	withSource: true,
+		// 	expectedKey: map[string]any{
+		// 		"payload": key,
+		// 		"schema":  keySchema,
+		// 	},
+		// },
 	}
 
 	for _, tc := range cases {
@@ -4020,8 +4060,12 @@ func TestChangefeedEnriched(t *testing.T) {
 				sqlDB.Exec(t, `CREATE TABLE foo (a INT PRIMARY KEY, b STRING)`)
 				sqlDB.Exec(t, `INSERT INTO foo values (0, 'dog')`)
 
-				foo := feed(t, f, fmt.Sprintf(`CREATE CHANGEFEED FOR foo WITH envelope=enriched, enriched_properties='%s'`,
-					strings.Join(tc.enrichedProperties, ",")))
+				create := fmt.Sprintf(`CREATE CHANGEFEED FOR foo WITH envelope=enriched, enriched_properties='%s'`,
+					strings.Join(tc.enrichedProperties, ","))
+				if tc.keyInValue {
+					create += ", key_in_value"
+				}
+				foo := feed(t, f, create)
 				defer closeFeed(t, foo)
 				// TODO(#139660): the webhook sink forces topic_in_value, but
 				// this is not supported by the enriched envelope type. We should adapt
