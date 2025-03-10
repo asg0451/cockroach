@@ -621,6 +621,7 @@ func (e *jsonEncoder) makeValueSchema(updated, prev cdcevent.Row) (json.JSON, er
 		source, _ = ptr(e.enrichedEnvelopeSourceProvider.KafkaConnectJSONSchema(), nil)
 	}
 
+	// TODO: handle keyInValue
 	envelope, err := kcjsonschema.NewEnrichedEnvelope(before, after, source).AsJSON()
 	if err != nil {
 		return nil, err
@@ -672,7 +673,7 @@ func (e *jsonEncoder) initEnrichedEnvelope(ctx context.Context) error {
 		}
 
 		if e.keyInValue {
-			// ?
+			// TODO: do we not include the schema here?
 			if err := ve.encodeKeyInValue(ctx, updated, payloadBuilder); err != nil {
 				return nil, err
 			}

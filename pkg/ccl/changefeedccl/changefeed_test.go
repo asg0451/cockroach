@@ -39,6 +39,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/cdctest"
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/changefeedbase"
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/checkpoint"
+	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/kcjsonschema"
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/kvevent"
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/resolvedspan"
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/schemafeed/schematestutils"
@@ -3900,6 +3901,12 @@ func TestChangefeedEnriched(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
+	withField := func(fieldName string, schema map[string]any) map[string]any {
+		s := maps.Clone(schema)
+		s["field"] = fieldName
+		return s
+	}
+
 	key := map[string]any{"a": 0}
 	keySchema := map[string]any{
 		"name": "foo.key",
@@ -3921,19 +3928,6 @@ func TestChangefeedEnriched(t *testing.T) {
 		"optional": false,
 		"type":     "struct",
 	}
-
-	afterSchemaWithKeyInValue := map[string]any{
-		"name":  "foo.after.value",
-		"field": "after",
-		"fields": []map[string]any{
-			{"field": "a", "optional": false, "type": "int64"},
-			{"field": "b", "optional": true, "type": "string"},
-			{"field": "key", "optional": false, "type": keySchema},
-		},
-		"optional": false,
-		"type":     "struct",
-	}
-	_ = afterSchemaWithKeyInValue
 
 	payload := map[string]any{
 		"after": afterVal,
@@ -4025,31 +4019,54 @@ func TestChangefeedEnriched(t *testing.T) {
 				"schema":  keySchema,
 			},
 		},
-		// {
-		// 	name:               "with schema and source and key_in_value",
-		// 	enrichedProperties: []string{"schema", "source"},
-		// 	keyInValue:         true,
-		// 	messageWithoutSource: map[string]any{
-		// 		"payload": payload,
-		// 		"schema": map[string]any{
-		// 			"name":     "cockroachdb.envelope",
-		// 			"optional": false,
-		// 			"fields": []map[string]any{
-		// 				// afterSchemaWithKeyInValue,
-		// 				afterSchema,
-		// 				sourceSchemaMap,
-		// 				tsNsSchema,
-		// 				opSchema,
-		// 			},
-		// 			"type": "struct",
-		// 		},
-		// 	},
-		// 	withSource: true,
-		// 	expectedKey: map[string]any{
-		// 		"payload": key,
-		// 		"schema":  keySchema,
-		// 	},
-		// },
+		{
+			name:       "with key_in_value",
+			keyInValue: true,
+			messageWithoutSource: map[string]any{
+				"after": afterVal,
+				"op":    "c",
+				"key":   withField("key", keySchema),
+			},
+			expectedKey: key,
+		},
+		{
+			name:               "with schema and source and key_in_value",
+			enrichedProperties: []string{"schema", "source"},
+			keyInValue:         true,
+			messageWithoutSource: map[string]any{
+				"payload": map[string]any{
+					"after": afterVal,
+					"op":    "c",
+					// TODO: this is a bit strange. do we want to do it this way?
+					// we could also omit the schema here just for sanity's sake.
+					"key": map[string]any{
+						"payload": key,
+						"schema":  keySchema,
+					},
+				},
+				"schema": map[string]any{
+					"name":     "cockroachdb.envelope",
+					"optional": false,
+					"fields": []map[string]any{
+						// ?
+						{
+							"type":  kcjsonschema.SchemaTypeOpaqueJSON,
+							"field": "key",
+						},
+						afterSchema,
+						sourceSchemaMap,
+						tsNsSchema,
+						opSchema,
+					},
+					"type": "struct",
+				},
+			},
+			withSource: true,
+			expectedKey: map[string]any{
+				"payload": key,
+				"schema":  keySchema,
+			},
+		},
 	}
 
 	for _, tc := range cases {
