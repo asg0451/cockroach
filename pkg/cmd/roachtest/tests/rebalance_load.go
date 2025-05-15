@@ -147,12 +147,10 @@ func registerRebalanceLoad(r registry.Registry) {
 	)
 	r.Add(
 		registry.TestSpec{
-			Name:    `rebalance/by-load/leases/mixed-version`,
-			Owner:   registry.OwnerKV,
-			Cluster: r.MakeClusterSpec(4), // the last node is just used to generate load
-			// Disabled on IBM because s390x is only built on master and mixed-version
-			// is impossible to test as of 05/2025.
-			CompatibleClouds: registry.AllClouds.NoAWS().NoIBM(),
+			Name:             `rebalance/by-load/leases/mixed-version`,
+			Owner:            registry.OwnerKV,
+			Cluster:          r.MakeClusterSpec(4), // the last node is just used to generate load
+			CompatibleClouds: registry.AllExceptAWS,
 			Suites:           registry.Suites(registry.MixedVersion, registry.Nightly),
 			Randomized:       true,
 			Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
@@ -185,12 +183,10 @@ func registerRebalanceLoad(r registry.Registry) {
 	)
 	r.Add(
 		registry.TestSpec{
-			Name:    `rebalance/by-load/replicas/mixed-version`,
-			Owner:   registry.OwnerKV,
-			Cluster: r.MakeClusterSpec(7), // the last node is just used to generate load
-			// Disabled on IBM because s390x is only built on master and mixed-version
-			// is impossible to test as of 05/2025.
-			CompatibleClouds: registry.AllClouds.NoAWS().NoIBM(),
+			Name:             `rebalance/by-load/replicas/mixed-version`,
+			Owner:            registry.OwnerKV,
+			Cluster:          r.MakeClusterSpec(7), // the last node is just used to generate load
+			CompatibleClouds: registry.AllExceptAWS,
 			Suites:           registry.Suites(registry.MixedVersion, registry.Nightly),
 			Randomized:       true,
 			Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
