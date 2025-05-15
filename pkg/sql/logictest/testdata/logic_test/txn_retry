@@ -1,7 +1,3 @@
-# TODO(#144278): remove this or adjust the test.
-statement ok
-SET kv_transaction_buffered_writes_enabled = false;
-
 # Check that we auto-retry pushed transactions which can't be refreshed - if
 # they're pushed while we can still auto-retry them.
 subtest autoretry-on-push-first-batch
@@ -29,8 +25,8 @@ user root
 # Run a cluster_logical_timestamp(), so that the transaction "observes its
 # commit timestamp" and so can't be refreshed, and the do an insert that will
 # cause the txn to be pushed.
-# cluster_logical_timestamp() is not supported in weak-iso-level-configs.
-skipif config weak-iso-level-configs
+# cluster_logical_timestamp() is not supported in local-read-committed.
+skipif config local-read-committed
 statement ok
 SELECT cluster_logical_timestamp(); INSERT INTO test_retry VALUES (1);
 

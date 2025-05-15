@@ -4,13 +4,13 @@
 // included in the /LICENSE file.
 
 //go:build linux
+// +build linux
 
 package disk
 
 import (
 	"io"
 	"io/fs"
-	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/util/sysutil"
 	"github.com/cockroachdb/errors"
@@ -26,16 +26,15 @@ type linuxStatsCollector struct {
 }
 
 // collect collects disk stats for the identified devices.
-func (s *linuxStatsCollector) collect(
-	disks []*monitoredDisk, now time.Time,
-) (countCollected int, err error) {
+func (s *linuxStatsCollector) collect(disks []*monitoredDisk) error {
 	var n int
+	var err error
 	for {
 		n, err = s.File.ReadAt(s.buf, 0)
 		if errors.Is(err, io.EOF) {
 			break
 		} else if err != nil {
-			return 0, err
+			return err
 		}
 		// err == nil
 		//
@@ -49,7 +48,7 @@ func (s *linuxStatsCollector) collect(
 		// single read. Reallocate (doubling) the buffer and continue.
 		s.buf = make([]byte, len(s.buf)*2)
 	}
-	return parseDiskStats(s.buf[:n], disks, now)
+	return parseDiskStats(s.buf[:n], disks)
 }
 
 func newStatsCollector(fs vfs.FS) (*linuxStatsCollector, error) {
