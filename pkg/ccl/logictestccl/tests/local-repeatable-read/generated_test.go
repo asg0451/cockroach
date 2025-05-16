@@ -608,13 +608,6 @@ func TestRepeatableReadLogic_dependencies(
 	runLogicTest(t, "dependencies")
 }
 
-func TestRepeatableReadLogic_direct_columnar_scans(
-	t *testing.T,
-) {
-	defer leaktest.AfterTest(t)()
-	runLogicTest(t, "direct_columnar_scans")
-}
-
 func TestRepeatableReadLogic_discard(
 	t *testing.T,
 ) {

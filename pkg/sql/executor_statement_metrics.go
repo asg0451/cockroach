@@ -27,31 +27,19 @@ type EngineMetrics struct {
 	// The subset of SELECTs that were executed by DistSQL with full or partial
 	// distribution.
 	DistSQLSelectDistributedCount *metric.Counter
-	DistSQLExecLatency            metric.IHistogram
-	DistSQLServiceLatency         metric.IHistogram
+	SQLOptPlanCacheHits           *metric.Counter
+	SQLOptPlanCacheMisses         *metric.Counter
+	StatementFingerprintCount     *metric.UniqueCounter
 
-	SQLOptPlanCacheHits   *metric.Counter
-	SQLOptPlanCacheMisses *metric.Counter
-
-	StatementFingerprintCount *metric.UniqueCounter
-	SQLExecLatencyDetail      *metric.HistogramVec
-
-	SQLExecLatency metric.IHistogram
-	// Exec Latency of only non-AOST queries
-	SQLExecLatencyConsistent metric.IHistogram
-	// Exec Latency of only AOST queries
-	SQLExecLatencyHistorical metric.IHistogram
-
-	SQLServiceLatency *aggmetric.SQLHistogram
-	// Service Latency of only non-AOST queries
-	SQLServiceLatencyConsistent metric.IHistogram
-	// Service Latency of only AOST queries
-	SQLServiceLatencyHistorical metric.IHistogram
-
-	SQLTxnLatency       *aggmetric.SQLHistogram
-	SQLTxnsOpen         *aggmetric.SQLGauge
-	SQLActiveStatements *aggmetric.SQLGauge
-	SQLContendedTxns    *metric.Counter
+	SQLExecLatencyDetail  *metric.HistogramVec
+	DistSQLExecLatency    metric.IHistogram
+	SQLExecLatency        metric.IHistogram
+	DistSQLServiceLatency metric.IHistogram
+	SQLServiceLatency     *aggmetric.SQLHistogram
+	SQLTxnLatency         *aggmetric.SQLHistogram
+	SQLTxnsOpen           *aggmetric.SQLGauge
+	SQLActiveStatements   *aggmetric.SQLGauge
+	SQLContendedTxns      *metric.Counter
 
 	// TxnAbortCount counts transactions that were aborted, either due
 	// to non-retriable errors, or retriable errors when the client-side
@@ -216,9 +204,8 @@ func (ex *connExecutor) recordStatementSummary(
 		ExecStats:            queryLevelStats,
 		// TODO(mgartner): Use a slice of struct{uint64, uint64} instead of
 		// converting to strings.
-		Indexes:   planner.instrumentation.indexesUsed.Strings(),
-		Database:  planner.SessionData().Database,
-		QueryTags: stmt.QueryTags,
+		Indexes:  planner.instrumentation.indexesUsed.Strings(),
+		Database: planner.SessionData().Database,
 	}
 
 	err := ex.statsCollector.RecordStatement(ctx, recordedStmtStats)
@@ -336,13 +323,6 @@ func (ex *connExecutor) recordStatementLatencyMetrics(
 			}
 			m.SQLExecLatency.RecordValue(runLatRaw.Nanoseconds())
 			m.SQLServiceLatency.RecordValue(svcLatRaw.Nanoseconds(), ex.sessionData().Database, ex.sessionData().ApplicationName)
-			if ex.state.isHistorical.Load() {
-				m.SQLExecLatencyHistorical.RecordValue(runLatRaw.Nanoseconds())
-				m.SQLServiceLatencyHistorical.RecordValue(svcLatRaw.Nanoseconds())
-			} else {
-				m.SQLExecLatencyConsistent.RecordValue(runLatRaw.Nanoseconds())
-				m.SQLServiceLatencyConsistent.RecordValue(svcLatRaw.Nanoseconds())
-			}
 		}
 	}
 }

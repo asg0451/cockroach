@@ -415,8 +415,10 @@ func TestSenderWithLatencyTracker(t *testing.T) {
 		}
 	}
 
+	// Add a leaseholder with replicas in different regions.
+	r := newMockReplica(15, ctpb.LEAD_FOR_GLOBAL_READS_WITH_NO_LATENCY_INFO, 1, 2, 3)
 	s, stopper := newMockSender(connFactory)
-	policyRefresher := policyrefresher.NewPolicyRefresher(stopper, st, s.GetLeaseholders, getLatencyFn, nil)
+	policyRefresher := policyrefresher.NewPolicyRefresher(stopper, st, s.GetLeaseholders, getLatencyFn)
 	defer stopper.Stop(ctx)
 	policyRefresher.Run(ctx)
 
@@ -436,9 +438,6 @@ func TestSenderWithLatencyTracker(t *testing.T) {
 	require.Equal(t, expGroupUpdates(s, now), up.ClosedTimestamps)
 	require.Nil(t, up.Removed)
 	require.Nil(t, up.AddedOrUpdated)
-
-	// Add a leaseholder with replicas in different regions.
-	r := newMockReplica(15, ctpb.LEAD_FOR_GLOBAL_READS_WITH_NO_LATENCY_INFO, 1, 2, 3)
 
 	// Verify policy updates when adding a leaseholder with far-away replicas.
 	s.RegisterLeaseholder(ctx, r, 1)

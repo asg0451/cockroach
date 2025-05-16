@@ -95,11 +95,11 @@ message HotRangesStats {
   double cpu_time_per_second = 13 [(gogoproto.customname) = "CPUTimePerSecond", (gogoproto.jsontag) = ",omitempty"];
 
   // Databases for the range.
-  repeated string databases = 16 [(gogoproto.moretags) = "redact:\"nonsensitive\""];
+  repeated string databases = 16;
   // Tables for the range
-  repeated string tables = 17 [(gogoproto.moretags) = "redact:\"nonsensitive\""];
+  repeated string tables = 17;
   // Indexes for the range
-  repeated string indexes = 18 [(gogoproto.moretags) = "redact:\"nonsensitive\""];
+  repeated string indexes = 18;
 
   // previously used for database, table, and index name
   // syntax reserved 4 to 6 breaks json encoding checks

@@ -3905,15 +3905,11 @@ func TestStoreRangeMergeRaftSnapshot(t *testing.T) {
 		}
 		keySpans := rditer.MakeReplicatedKeySpans(inSnap.Desc)
 		sstFileWriters := map[string]sstFileWriter{}
-		for i, span := range keySpans {
+		for _, span := range keySpans {
 			file := &storage.MemObject{}
 			writer := storage.MakeIngestionSSTWriter(ctx, st, file)
-			if i < len(keySpans)-1 {
-				// The last span is the MVCC span, and is always cleared via Excise.
-				// See MultiSSTWriter.
-				if err := writer.ClearRawRange(span.Key, span.EndKey, true /* pointKeys */, true /* rangeKeys */); err != nil {
-					return err
-				}
+			if err := writer.ClearRawRange(span.Key, span.EndKey, true /* pointKeys */, true /* rangeKeys */); err != nil {
+				return err
 			}
 			sstFileWriters[string(span.Key)] = sstFileWriter{
 				span:   span,
@@ -4023,7 +4019,7 @@ func TestStoreRangeMergeRaftSnapshot(t *testing.T) {
 			EndKey:   roachpb.RKey(keyEnd),
 		}
 		if err := storage.ClearRangeWithHeuristic(
-			ctx, receivingEng, &sst, desc.StartKey.AsRawKey(), desc.EndKey.AsRawKey(), 64,
+			ctx, receivingEng, &sst, desc.StartKey.AsRawKey(), desc.EndKey.AsRawKey(), 64, 8,
 		); err != nil {
 			return err
 		}

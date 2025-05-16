@@ -213,13 +213,12 @@ func EncodeRaBitQVector(
 	return appendTo
 }
 
-// EncodeUnquantizerVector encodes an Unquantizer vector into the given byte
-// slice.
-func EncodeUnquantizerVector(appendTo []byte, v vector.T) ([]byte, error) {
-	// For backwards compatibility, encode a zero float32. Previously, the
-	// distance of the vector to the centroid was encoded, but that is no longer
-	// necessary.
-	appendTo = encoding.EncodeUntaggedFloat32Value(appendTo, 0)
+// EncodeUnquantizerVector encodes an Unquantizer vector and centroid distance
+// into the given byte slice.
+func EncodeUnquantizerVector(
+	appendTo []byte, centroidDistance float32, v vector.T,
+) ([]byte, error) {
+	appendTo = encoding.EncodeUntaggedFloat32Value(appendTo, centroidDistance)
 	return vector.Encode(appendTo, v)
 }
 
@@ -322,11 +321,9 @@ func DecodeRaBitQVectorToSet(
 	if err != nil {
 		return nil, err
 	}
-	// TODO(andyk): Also decode CentroidDotProducts once we support other distance
-	// metrics.
 	vectorSet.CodeCounts = append(vectorSet.CodeCounts, codeCount)
 	vectorSet.CentroidDistances = append(vectorSet.CentroidDistances, centroidDistance)
-	vectorSet.QuantizedDotProducts = append(vectorSet.QuantizedDotProducts, dotProduct)
+	vectorSet.DotProducts = append(vectorSet.DotProducts, dotProduct)
 	vectorSet.Codes.Data = slices.Grow(vectorSet.Codes.Data, vectorSet.Codes.Width)
 	for range vectorSet.Codes.Width {
 		var codeWord uint64
@@ -347,13 +344,15 @@ func DecodeRaBitQVectorToSet(
 func DecodeUnquantizerVectorToSet(
 	encVector []byte, vectorSet *quantize.UnQuantizedVectorSet,
 ) ([]byte, error) {
-	// Skip past the centroid distance, which was encoded as a 4-byte float32
-	// value in a previous version.
-	encVector = encVector[4:]
+	encVector, centroidDistance, err := encoding.DecodeUntaggedFloat32Value(encVector)
+	if err != nil {
+		return nil, err
+	}
 	encVector, v, err := vector.Decode(encVector)
 	if err != nil {
 		return nil, err
 	}
+	vectorSet.CentroidDistances = append(vectorSet.CentroidDistances, centroidDistance)
 	vectorSet.Vectors.Add(v)
 	return encVector, nil
 }

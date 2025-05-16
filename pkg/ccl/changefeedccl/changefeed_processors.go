@@ -38,7 +38,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/eval"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	bulkutil "github.com/cockroachdb/cockroach/pkg/util/bulk"
 	"github.com/cockroachdb/cockroach/pkg/util/cancelchecker"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
@@ -48,7 +47,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/cockroach/pkg/util/span"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
-	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/logtags"
@@ -108,11 +106,6 @@ type changeAggregator struct {
 	// frontier keeps track of resolved timestamps for spans along with schema change
 	// boundary information.
 	frontier *resolvedspan.AggregatorFrontier
-
-	// Aggregator that aggregates StructuredEvents emitted in the
-	// changeAggregator's trace recording.
-	agg      *tracing.TracingAggregator
-	aggTimer timeutil.Timer
 
 	metrics                *Metrics
 	sliMetrics             *sliMetrics
@@ -232,12 +225,6 @@ func newChangeAggregatorProcessor(
 					producerMeta = []execinfrapb.ProducerMetadata{{Changefeed: &meta}}
 				}
 
-				if ca.agg != nil {
-					meta := bulkutil.ConstructTracingAggregatorProducerMeta(ctx,
-						ca.FlowCtx.NodeID.SQLInstanceID(), ca.FlowCtx.ID, ca.agg)
-					producerMeta = append(producerMeta, *meta)
-				}
-
 				ca.close()
 				return producerMeta
 			},
@@ -315,9 +302,8 @@ func (ca *changeAggregator) wrapMetricsRecorderWithTelemetry(
 }
 
 const (
-	changeAggregatorLogTag  = "change-aggregator"
-	changeFrontierLogTag    = "change-frontier"
-	tracingAggTimerInterval = 15 * time.Second
+	changeAggregatorLogTag = "change-aggregator"
+	changeFrontierLogTag   = "change-frontier"
 )
 
 // Start is part of the RowSource interface.
@@ -330,13 +316,7 @@ func (ca *changeAggregator) Start(ctx context.Context) {
 	}
 	ctx = logtags.RemoveTag(ctx, changeFrontierLogTag)
 	ctx = logtags.AddTag(ctx, changeAggregatorLogTag, nil /* value */)
-
-	ca.agg = tracing.TracingAggregatorForContext(ctx)
-	if ca.agg != nil {
-		ca.aggTimer.Reset(tracingAggTimerInterval)
-	}
-
-	ctx = ca.StartInternal(ctx, changeAggregatorProcName, ca.agg)
+	ctx = ca.StartInternal(ctx, changeAggregatorProcName)
 
 	spans, err := ca.setupSpansAndFrontier()
 	if err != nil {
@@ -714,6 +694,7 @@ var aggregatorHeartbeatFrequency = settings.RegisterDurationSetting(
 	"changefeed aggregator will emit a heartbeat message to the coordinator with this frequency; 0 disables. "+
 		"The setting value should be <=1/2 of server.shutdown.jobs.timeout period",
 	4*time.Second,
+	settings.NonNegativeDuration,
 )
 
 var aggregatorFlushJitter = settings.RegisterFloatSetting(
@@ -730,11 +711,10 @@ func nextFlushWithJitter(s timeutil.TimeSource, d time.Duration, j float64) (tim
 	if j < 0 || d < 0 {
 		return s.Now(), errors.AssertionFailedf("invalid jitter value: %f, duration: %s", j, d)
 	}
-	maxJitter := int64(j * float64(d))
-	if maxJitter == 0 {
+	if j == 0 || d == 0 {
 		return s.Now().Add(d), nil
 	}
-	nextFlush := d + time.Duration(rand.Int63n(maxJitter))
+	nextFlush := d + time.Duration(rand.Int63n(int64(j*float64(d))))
 	return s.Now().Add(nextFlush), nil
 }
 
@@ -776,15 +756,6 @@ func (ca *changeAggregator) Next() (rowenc.EncDatumRow, *execinfrapb.ProducerMet
 			}
 			ca.MoveToDraining(err)
 			break
-		}
-
-		select {
-		case <-ca.aggTimer.C:
-			ca.aggTimer.Read = true
-			ca.aggTimer.Reset(tracingAggTimerInterval)
-			return nil, bulkutil.ConstructTracingAggregatorProducerMeta(ca.Ctx(),
-				ca.FlowCtx.NodeID.SQLInstanceID(), ca.FlowCtx.ID, ca.agg)
-		default:
 		}
 
 		if err := ca.tick(); err != nil {
@@ -1081,11 +1052,6 @@ type changeFrontier struct {
 	metricsID    int
 	sliMetricsID int64
 
-	// Aggregator that aggregates StructuredEvents emitted in the
-	// changeFrontier's trace recording.
-	agg      *tracing.TracingAggregator
-	aggTimer timeutil.Timer
-
 	knobs TestingKnobs
 
 	usageWg       sync.WaitGroup
@@ -1267,17 +1233,11 @@ func newChangeFrontierProcessor(
 		processorID,
 		memMonitor,
 		execinfra.ProcStateOpts{
-			InputsToDrain: []execinfra.RowSource{cf.input},
 			TrailingMetaCallback: func() []execinfrapb.ProducerMetadata {
 				cf.close()
-
-				if cf.agg != nil {
-					meta := bulkutil.ConstructTracingAggregatorProducerMeta(ctx,
-						cf.FlowCtx.NodeID.SQLInstanceID(), cf.FlowCtx.ID, cf.agg)
-					return []execinfrapb.ProducerMetadata{*meta}
-				}
 				return nil
 			},
+			InputsToDrain: []execinfra.RowSource{cf.input},
 		},
 	); err != nil {
 		return nil, err
@@ -1337,16 +1297,9 @@ func (cf *changeFrontier) Start(ctx context.Context) {
 		ctx = logtags.AddTag(ctx, "job", cf.spec.JobID)
 	}
 	ctx = logtags.AddTag(ctx, changeFrontierLogTag, nil /* value */)
-
-	cf.agg = tracing.TracingAggregatorForContext(ctx)
-	if cf.agg != nil {
-		cf.aggTimer.Reset(1 * time.Second)
-	}
-
 	// StartInternal called at the beginning of the function because there are
 	// early returns if errors are detected.
-	ctx = cf.StartInternal(ctx, changeFrontierProcName, cf.agg)
-
+	ctx = cf.StartInternal(ctx, changeFrontierProcName)
 	cf.input.Start(ctx)
 
 	// The job registry has a set of metrics used to monitor the various jobs it
@@ -1516,6 +1469,7 @@ func (cf *changeFrontier) runUsageMetricReporting(ctx context.Context) {
 		t.Reset(reportingInterval - lastDuration)
 		select {
 		case start = <-t.Ch():
+			t.MarkRead()
 		case <-ctx.Done():
 			return
 		}
@@ -1584,15 +1538,6 @@ func (cf *changeFrontier) Next() (rowenc.EncDatumRow, *execinfrapb.ProducerMetad
 			return cf.ProcessRowHelper(cf.passthroughBuf.Pop()), nil
 		} else if !cf.resolvedBuf.IsEmpty() {
 			return cf.ProcessRowHelper(cf.resolvedBuf.Pop()), nil
-		}
-
-		select {
-		case <-cf.aggTimer.C:
-			cf.aggTimer.Read = true
-			cf.aggTimer.Reset(1 * time.Second)
-			return nil, bulkutil.ConstructTracingAggregatorProducerMeta(cf.Ctx(),
-				cf.FlowCtx.NodeID.SQLInstanceID(), cf.FlowCtx.ID, cf.agg)
-		default:
 		}
 
 		if ok, boundaryType, boundaryTime := cf.frontier.AtBoundary(); ok &&

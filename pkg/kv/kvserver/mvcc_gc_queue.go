@@ -99,6 +99,7 @@ var mvccGCQueueInterval = settings.RegisterDurationSetting(
 	"kv.mvcc_gc.queue_interval",
 	"how long the mvcc gc queue waits between processing replicas",
 	mvccGCQueueDefaultTimerDuration,
+	settings.NonNegativeDuration,
 )
 
 // mvccGCQueueHighPriInterval
@@ -107,6 +108,7 @@ var mvccGCQueueHighPriInterval = settings.RegisterDurationSetting(
 	"kv.mvcc_gc.queue_high_priority_interval",
 	"how long the mvcc gc queue waits between processing high priority replicas (e.g. after table drops)",
 	mvccHiPriGCQueueDefaultTimerDuration,
+	settings.NonNegativeDuration,
 )
 
 // EnqueueInMvccGCQueueOnSpanConfigUpdateEnabled controls whether replicas

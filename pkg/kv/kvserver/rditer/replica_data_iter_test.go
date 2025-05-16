@@ -574,7 +574,7 @@ func benchReplicaEngineDataIterator(b *testing.B, numRanges, numKeysPerRange, va
 	}
 	require.NoError(b, batch.Commit(true /* sync */))
 	require.NoError(b, eng.Flush())
-	require.NoError(b, eng.Compact(ctx))
+	require.NoError(b, eng.Compact())
 
 	snapshot := eng.NewSnapshot()
 	defer snapshot.Close()

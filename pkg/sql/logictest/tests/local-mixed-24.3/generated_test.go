@@ -479,6 +479,13 @@ func TestLogic_create_as(
 	runLogicTest(t, "create_as")
 }
 
+func TestLogic_create_statements(
+	t *testing.T,
+) {
+	defer leaktest.AfterTest(t)()
+	runLogicTest(t, "create_statements")
+}
+
 func TestLogic_cross_join(
 	t *testing.T,
 ) {
@@ -554,13 +561,6 @@ func TestLogic_dependencies(
 ) {
 	defer leaktest.AfterTest(t)()
 	runLogicTest(t, "dependencies")
-}
-
-func TestLogic_direct_columnar_scans(
-	t *testing.T,
-) {
-	defer leaktest.AfterTest(t)()
-	runLogicTest(t, "direct_columnar_scans")
 }
 
 func TestLogic_discard(

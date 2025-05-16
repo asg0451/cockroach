@@ -53,6 +53,7 @@ var (
 		"bulkio.ingest.flush_delay",
 		"amount of time to wait before sending a file to the KV/Storage layer to ingest",
 		0,
+		settings.NonNegativeDuration,
 	)
 
 	senderConcurrency = settings.RegisterIntSetting(

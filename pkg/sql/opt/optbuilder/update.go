@@ -352,22 +352,15 @@ func (mb *mutationBuilder) buildUpdate(
 	// check constraint, refer to the correct columns.
 	mb.disambiguateColumns()
 
-	// Build the scopes for the RETURNING clause early (if present). The
-	// returning expression is built later on, but for RLS we need to build the
-	// scopes and collect column references in order to determine whether SELECT
-	// policies should be applied as check constraints, which are built prior to
-	// the returning expression. RLS SELECT policies are applied as check
-	// constraints if the RETURNING clause references columns in the target
-	// table.
-	returningInScope, returningOutScope := mb.buildReturningScopes(returning, colRefs)
+	// Build scopes for the RETURNING clause early (if present). This is needed for
+	// RLS to determine whether SELECT policies should be applied, based on
+	// whether the clause references columns in the target table.
+	returningInScope, returningOutScope := mb.maybeBuildReturningScopes(returning, colRefs)
 
 	// Apply SELECT policies if any referenced columns are read during row fetches.
 	// This includes:
 	// - Columns needed for the initial fetch (SET/WHERE).
 	// - Columns read post-mutation (e.g., for RETURNING).
-	//
-	// These checks only matter if the target table has RLS enabled, so we gate
-	// the logic behind that for performance reasons.
 	includeSelectPolicies := false
 	if mb.tab.IsRowLevelSecurityEnabled() && colRefs != nil {
 		for _, colID := range mb.fetchColIDs {
@@ -415,5 +408,5 @@ func (mb *mutationBuilder) buildUpdate(
 	mb.outScope.expr = mb.b.factory.ConstructUpdate(
 		mb.outScope.expr, mb.uniqueChecks, mb.fkChecks, private,
 	)
-	mb.buildReturning(returning, returningInScope, returningOutScope)
+	mb.completeBuildReturning(returningInScope, returningOutScope)
 }

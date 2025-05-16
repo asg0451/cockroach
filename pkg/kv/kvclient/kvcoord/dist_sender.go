@@ -87,20 +87,22 @@ var (
 	metaDistSenderCrossZoneBatchRequestBytes = metric.Metadata{
 		Name: "distsender.batch_requests.cross_zone.bytes",
 		Help: `Total byte count of replica-addressed batch requests processed cross
-		zone within the same region when zone tiers are configured. If region tiers
-		are not set, it is assumed to be within the same region. To ensure accurate
-		monitoring of cross-zone data transfer, region and zone tiers should be
-		consistently configured across all nodes.`,
+		zone within the same region when region and zone tiers are configured.
+		However, if the region tiers are not configured, this count may also include
+		batch data sent between different regions. Ensuring consistent configuration
+		of region and zone tiers across nodes helps to accurately monitor the data
+		transmitted.`,
 		Measurement: "Bytes",
 		Unit:        metric.Unit_BYTES,
 	}
 	metaDistSenderCrossZoneBatchResponseBytes = metric.Metadata{
 		Name: "distsender.batch_responses.cross_zone.bytes",
 		Help: `Total byte count of replica-addressed batch responses received cross
-		zone within the same region when zone tiers are configured. If region tiers
-		are not set, it is assumed to be within the same region. To ensure accurate
-		monitoring of cross-zone data transfer, region and zone tiers should be
-		consistently configured across all nodes.`,
+		zone within the same region when region and zone tiers are configured.
+		However, if the region tiers are not configured, this count may also include
+		batch data received between different regions. Ensuring consistent
+		configuration of region and zone tiers across nodes helps to accurately
+		monitor the data transmitted.`,
 		Measurement: "Bytes",
 		Unit:        metric.Unit_BYTES,
 	}
@@ -145,18 +147,12 @@ var (
 		Help:        "Number of replica-addressed RPCs sent due to per-replica errors",
 		Measurement: "RPCs",
 		Unit:        metric.Unit_COUNT,
-		Essential:   true,
-		Category:    metric.Metadata_DISTRIBUTED,
-		HowToUse:    `RPC errors do not necessarily indicate a problem. This metric tracks remote procedure calls that return a status value other than "success". A non-success status of an RPC should not be misconstrued as a network transport issue. It is database code logic executed on another cluster node. The non-success status is a result of an orderly execution of an RPC that reports a specific logical condition.`,
 	}
 	metaDistSenderNotLeaseHolderErrCount = metric.Metadata{
 		Name:        "distsender.errors.notleaseholder",
 		Help:        "Number of NotLeaseHolderErrors encountered from replica-addressed RPCs",
 		Measurement: "Errors",
 		Unit:        metric.Unit_COUNT,
-		Essential:   true,
-		Category:    metric.Metadata_DISTRIBUTED,
-		HowToUse:    `Errors of this type are normal during elastic cluster topology changes when leaseholders are actively rebalancing. They are automatically retried. However they may create occasional response time spikes. In that case, this metric may provide the explanation of the cause.`,
 	}
 	metaDistSenderInLeaseTransferBackoffsCount = metric.Metadata{
 		Name:        "distsender.errors.inleasetransferbackoffs",
@@ -610,25 +606,21 @@ func (DistSenderRangeFeedMetrics) MetricStruct() {}
 
 // updateCrossLocalityMetricsOnReplicaAddressedBatchRequest updates
 // DistSenderMetrics for batch requests that have been divided and are currently
-// forwarding to a specific replica for the corresponding range. These metrics
-// may include batches that were not successfully sent but were terminated at an
-// early stage.
+// forwarding to a specific replica for the corresponding range. The metrics
+// being updated include 1. total byte count of replica-addressed batch requests
+// processed 2. cross-region metrics, which monitor activities across different
+// regions, and 3. cross-zone metrics, which monitor activities across different
+// zones within the same region or in cases where region tiers are not
+// configured. These metrics may include batches that were not successfully sent
+// but were terminated at an early stage.
 func (dm *DistSenderMetrics) updateCrossLocalityMetricsOnReplicaAddressedBatchRequest(
 	comparisonResult roachpb.LocalityComparisonType, inc int64,
 ) {
-	// Update metrics for total byte count of replica-addressed batch requests
-	// processed.
 	dm.ReplicaAddressedBatchRequestBytes.Inc(inc)
-	// In cases where both region and zone tiers are not configured,
-	// comparisonResult will be UNDEFINED.
 	switch comparisonResult {
 	case roachpb.LocalityComparisonType_CROSS_REGION:
-		// Update cross-region metrics: monitor activities across different regions.
 		dm.CrossRegionBatchRequestBytes.Inc(inc)
 	case roachpb.LocalityComparisonType_SAME_REGION_CROSS_ZONE:
-		// Update cross-zone metrics: monitor activities across different zones
-		// within the same region. If region tiers are not set, it is assumed to be
-		// within the same region.
 		dm.CrossZoneBatchRequestBytes.Inc(inc)
 	}
 }
@@ -642,8 +634,6 @@ func (dm *DistSenderMetrics) updateCrossLocalityMetricsOnReplicaAddressedBatchRe
 	comparisonResult roachpb.LocalityComparisonType, inc int64,
 ) {
 	dm.ReplicaAddressedBatchResponseBytes.Inc(inc)
-	// Read more about locality comparison in
-	// updateCrossLocalityMetricsOnReplicaAddressedBatchRequest above.
 	switch comparisonResult {
 	case roachpb.LocalityComparisonType_CROSS_REGION:
 		dm.CrossRegionBatchResponseBytes.Inc(inc)

@@ -32,7 +32,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execstats"
 	"github.com/cockroachdb/cockroach/pkg/sql/isql"
-	"github.com/cockroachdb/cockroach/pkg/sql/opt/cat"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec/explain"
 	"github.com/cockroachdb/cockroach/pkg/sql/paramparse"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
@@ -40,7 +39,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/physicalplan"
-	"github.com/cockroachdb/cockroach/pkg/sql/prep"
 	"github.com/cockroachdb/cockroach/pkg/sql/regions"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/asof"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/eval"
@@ -60,8 +58,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/errorutil/unimplemented"
 	"github.com/cockroachdb/cockroach/pkg/util/fsm"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
-	// This import is needed here to properly inject tree.ValidateJSONPath from
-	// pkg/util/jsonpath/parser/parse.go.
+	// TODO(normanchenn): temporarily import the parser here to ensure that
+	// init() is called.
 	_ "github.com/cockroachdb/cockroach/pkg/util/jsonpath/parser"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/log/eventpb"
@@ -75,7 +73,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/crlib/crtime"
 	"github.com/cockroachdb/errors"
-	"github.com/cockroachdb/logtags"
 	"github.com/cockroachdb/redact"
 	"github.com/lib/pq/oid"
 	"go.opentelemetry.io/otel/attribute"
@@ -153,7 +150,7 @@ func (ex *connExecutor) execStmt(
 		ev, payload = ex.execStmtInNoTxnState(ctx, parserStmt, res)
 
 	case stateOpen:
-		var preparedStmt *prep.Statement
+		var preparedStmt *PreparedStatement
 		if portal != nil {
 			preparedStmt = portal.Stmt
 		}
@@ -352,7 +349,7 @@ func (ex *connExecutor) execPortal(
 func (ex *connExecutor) execStmtInOpenState(
 	ctx context.Context,
 	parserStmt statements.Statement[tree.Statement],
-	prepared *prep.Statement,
+	prepared *PreparedStatement,
 	pinfo *tree.PlaceholderInfo,
 	res RestrictedCommandResult,
 	canAutoCommit bool,
@@ -386,14 +383,6 @@ func (ex *connExecutor) execStmtInOpenState(
 		stmt = makeStatementFromPrepared(prepared, queryID)
 	} else {
 		stmt = makeStatement(parserStmt, queryID, stmtFingerprintFmtMask)
-	}
-
-	if len(stmt.QueryTags) > 0 {
-		tags := &logtags.Buffer{}
-		for _, tag := range stmt.QueryTags {
-			tags = tags.Add("querytag-"+tag.Key, tag.Value)
-		}
-		ctx = logtags.AddTags(ctx, tags)
 	}
 
 	var queryTimeoutTicker *time.Timer
@@ -537,10 +526,11 @@ func (ex *connExecutor) execStmtInOpenState(
 		// Replace the `EXECUTE foo` statement with the prepared statement, and
 		// continue execution.
 		name := e.Name.String()
-		ps, ok := ex.extraTxnState.prepStmtsNamespace.prepStmts.Get(name)
+		ps, ok := ex.extraTxnState.prepStmtsNamespace.prepStmts[name]
 		if !ok {
 			return makeErrEvent(newPreparedStmtDNEError(ex.sessionData(), name))
 		}
+		ex.extraTxnState.prepStmtsNamespace.touchLRUEntry(name)
 
 		var err error
 		pinfo, err = ex.planner.fillInPlaceholders(ctx, ps, name, e.Params)
@@ -862,7 +852,7 @@ func (ex *connExecutor) execStmtInOpenState(
 		// This is handling the SQL statement "PREPARE". See execPrepare for
 		// handling of the protocol-level command for preparing statements.
 		name := s.Name.String()
-		if ex.extraTxnState.prepStmtsNamespace.prepStmts.Has(name) {
+		if _, ok := ex.extraTxnState.prepStmtsNamespace.prepStmts[name]; ok {
 			err := pgerror.Newf(
 				pgcode.DuplicatePreparedStatement,
 				"prepared statement %q already exists", name,
@@ -923,7 +913,7 @@ func (ex *connExecutor) execStmtInOpenState(
 			p.extendedEvalCtx.Placeholders = oldPlaceholders
 		}()
 		if _, err := ex.addPreparedStmt(
-			ctx, name, prepStmt, typeHints, rawTypeHints, prep.StatementOriginSQL,
+			ctx, name, prepStmt, typeHints, rawTypeHints, PreparedStatementOriginSQL,
 		); err != nil {
 			return makeErrEvent(err)
 		}
@@ -1502,10 +1492,11 @@ func (ex *connExecutor) execStmtInOpenStateWithPausablePortal(
 		// Replace the `EXECUTE foo` statement with the prepared statement, and
 		// continue execution.
 		name := e.Name.String()
-		ps, ok := ex.extraTxnState.prepStmtsNamespace.prepStmts.Get(name)
+		ps, ok := ex.extraTxnState.prepStmtsNamespace.prepStmts[name]
 		if !ok {
 			return makeErrEvent(newPreparedStmtDNEError(ex.sessionData(), name))
 		}
+		ex.extraTxnState.prepStmtsNamespace.touchLRUEntry(name)
 
 		var err error
 		pinfo, err = ex.planner.fillInPlaceholders(ctx, ps, name, e.Params)
@@ -1896,7 +1887,7 @@ func (ex *connExecutor) execStmtInOpenStateWithPausablePortal(
 		// This is handling the SQL statement "PREPARE". See execPrepare for
 		// handling of the protocol-level command for preparing statements.
 		name := s.Name.String()
-		if ex.extraTxnState.prepStmtsNamespace.prepStmts.Has(name) {
+		if _, ok := ex.extraTxnState.prepStmtsNamespace.prepStmts[name]; ok {
 			err := pgerror.Newf(
 				pgcode.DuplicatePreparedStatement,
 				"prepared statement %q already exists", name,
@@ -1957,7 +1948,7 @@ func (ex *connExecutor) execStmtInOpenStateWithPausablePortal(
 			p.extendedEvalCtx.Placeholders = oldPlaceholders
 		}()
 		if _, err := ex.addPreparedStmt(
-			ctx, name, prepStmt, typeHints, rawTypeHints, prep.StatementOriginSQL,
+			ctx, name, prepStmt, typeHints, rawTypeHints, PreparedStatementOriginSQL,
 		); err != nil {
 			return makeErrEvent(err)
 		}
@@ -2538,7 +2529,7 @@ func (ex *connExecutor) commitSQLTransactionInternal(ctx context.Context) (retEr
 		return err
 	}
 
-	ex.extraTxnState.prepStmtsNamespace.closePortals(ctx, &ex.extraTxnState.prepStmtsNamespaceMemAcc)
+	ex.extraTxnState.prepStmtsNamespace.closeAllPortals(ctx, &ex.extraTxnState.prepStmtsNamespaceMemAcc)
 
 	// We need to step the transaction's internal read sequence before committing
 	// if it has stepping enabled. If it doesn't have stepping enabled, then we
@@ -2668,7 +2659,7 @@ func (ex *connExecutor) rollbackSQLTransaction(
 		return ex.makeErrEvent(err, stmt)
 	}
 
-	ex.extraTxnState.prepStmtsNamespace.closePortals(ctx, &ex.extraTxnState.prepStmtsNamespaceMemAcc)
+	ex.extraTxnState.prepStmtsNamespace.closeAllPortals(ctx, &ex.extraTxnState.prepStmtsNamespaceMemAcc)
 	ex.recordDDLTxnTelemetry(true /* failed */)
 
 	// A non-retryable error automatically rolls-back the transaction if there are
@@ -3370,22 +3361,6 @@ func (ex *connExecutor) makeExecPlan(
 	// Include gist in error reports.
 	ih := &planner.instrumentation
 	ctx = withPlanGist(ctx, ih.planGist.String())
-	if buildutil.CrdbTestBuild && ih.planGist.String() != "" {
-		// Ensure that the gist can be decoded in test builds.
-		//
-		// In 50% cases, use nil catalog.
-		var catalog cat.Catalog
-		if ex.rng.internal.Float64() < 0.5 && !planner.SessionData().AllowRoleMembershipsToChangeDuringTransaction {
-			// For some reason, TestAllowRoleMembershipsToChangeDuringTransaction
-			// times out with non-nil catalog, so we'll keep it as nil when the
-			// session var is set to 'true' ('false' is the default).
-			catalog = planner.optPlanningCtx.catalog
-		}
-		_, err := explain.DecodePlanGistToRows(ctx, &planner.extendedEvalCtx.Context, ih.planGist.String(), catalog)
-		if err != nil {
-			return ctx, errors.NewAssertionErrorWithWrappedErrf(err, "failed to decode plan gist: %q", ih.planGist.String())
-		}
-	}
 
 	// Now that we have the plan gist, check whether we should get a bundle for
 	// it.
@@ -4471,7 +4446,10 @@ func logTraceAboveThreshold(
 }
 
 func (ex *connExecutor) execWithProfiling(
-	ctx context.Context, ast tree.Statement, prepared *prep.Statement, op func(context.Context) error,
+	ctx context.Context,
+	ast tree.Statement,
+	prepared *PreparedStatement,
+	op func(context.Context) error,
 ) error {
 	var err error
 	if ex.server.cfg.Settings.CPUProfileType() == cluster.CPUProfileWithLabels {

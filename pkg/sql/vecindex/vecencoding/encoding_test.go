@@ -19,7 +19,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/vecindex/cspann"
 	"github.com/cockroachdb/cockroach/pkg/sql/vecindex/cspann/quantize"
 	"github.com/cockroachdb/cockroach/pkg/sql/vecindex/cspann/testutils"
-	"github.com/cockroachdb/cockroach/pkg/sql/vecindex/cspann/vecdist"
 	"github.com/cockroachdb/cockroach/pkg/sql/vecindex/cspann/workspace"
 	"github.com/cockroachdb/cockroach/pkg/sql/vecindex/vecencoding"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
@@ -52,8 +51,8 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 func testEncodeDecodeRoundTripImpl(t *testing.T, rnd *rand.Rand, set vector.Set) {
 	var workspace workspace.T
 	for _, quantizer := range []quantize.Quantizer{
-		quantize.NewUnQuantizer(set.Dims, vecdist.L2Squared),
-		quantize.NewRaBitQuantizer(set.Dims, rnd.Int63(), vecdist.L2Squared),
+		quantize.NewUnQuantizer(set.Dims),
+		quantize.NewRaBitQuantizer(set.Dims, rnd.Int63()),
 	} {
 		name := strings.TrimPrefix(fmt.Sprintf("%T", quantizer), "*quantize.")
 		t.Run(name, func(t *testing.T) {
@@ -88,12 +87,14 @@ func testEncodeDecodeRoundTripImpl(t *testing.T, rnd *rand.Rand, set vector.Set)
 						switch quantizedSet := quantizedSet.(type) {
 						case *quantize.UnQuantizedVectorSet:
 							var err error
-							buf, err = vecencoding.EncodeUnquantizerVector(buf, set.At(i))
+							buf, err = vecencoding.EncodeUnquantizerVector(buf,
+								quantizedSet.GetCentroidDistances()[i], set.At(i),
+							)
 							require.NoError(t, err)
 						case *quantize.RaBitQuantizedVectorSet:
 							buf = vecencoding.EncodeRaBitQVector(buf,
 								quantizedSet.CodeCounts[i], quantizedSet.CentroidDistances[i],
-								quantizedSet.QuantizedDotProducts[i], quantizedSet.Codes.At(i),
+								quantizedSet.DotProducts[i], quantizedSet.Codes.At(i),
 							)
 						}
 					}
@@ -148,6 +149,7 @@ func testingAssertPartitionsEqual(t *testing.T, l, r *cspann.Partition) {
 	q1, q2 := l.QuantizedSet(), r.QuantizedSet()
 	require.Equal(t, q1.GetCentroid(), q2.GetCentroid(), "centroids do not match")
 	require.Equal(t, q1.GetCount(), q2.GetCount(), "counts do not match")
+	require.Equal(t, q1.GetCentroidDistances(), q2.GetCentroidDistances(), "distances do not match")
 	switch leftSet := q1.(type) {
 	case *quantize.UnQuantizedVectorSet:
 		rightSet, ok := q2.(*quantize.UnQuantizedVectorSet)
@@ -158,9 +160,7 @@ func testingAssertPartitionsEqual(t *testing.T, l, r *cspann.Partition) {
 		require.True(t, ok, "quantized set types do not match")
 		require.Equal(t, leftSet.CodeCounts, rightSet.CodeCounts, "code counts do not match")
 		require.Equal(t, leftSet.Codes, rightSet.Codes, "codes do not match")
-		require.Equal(t, leftSet.QuantizedDotProducts, rightSet.QuantizedDotProducts, "dot products do not match")
-		require.Equal(t, leftSet.CentroidDistances, rightSet.CentroidDistances,
-			"centroid distances do not match")
+		require.Equal(t, leftSet.DotProducts, rightSet.DotProducts, "dot products do not match")
 	default:
 		t.Fatalf("unexpected type %T", q1)
 	}

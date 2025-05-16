@@ -17,7 +17,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/catid"
 	"github.com/cockroachdb/cockroach/pkg/sql/vecindex/cspann"
 	"github.com/cockroachdb/cockroach/pkg/sql/vecindex/cspann/quantize"
-	"github.com/cockroachdb/cockroach/pkg/sql/vecindex/cspann/vecdist"
 	"github.com/cockroachdb/cockroach/pkg/sql/vecindex/vecpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/vecindex/vecstore"
 	"github.com/cockroachdb/cockroach/pkg/util/buildutil"
@@ -171,7 +170,7 @@ func (m *Manager) GetWithDesc(
 		func() (*cspann.Index, error) {
 			// TODO(drewk): use the config to populate the index options as well.
 			config := index.GetVecConfig()
-			quantizer := quantize.NewRaBitQuantizer(int(config.Dims), config.Seed, vecdist.L2Squared)
+			quantizer := quantize.NewRaBitQuantizer(int(config.Dims), config.Seed)
 			store, err := vecstore.NewWithColumnID(
 				ctx, m.db, quantizer, m.codec, desc, index.GetID(), index.VectorColumnID(),
 			)
@@ -202,7 +201,7 @@ func (m *Manager) Get(
 				return nil, err
 			}
 			// TODO(drewk): use the config to populate the index options as well.
-			quantizer := quantize.NewRaBitQuantizer(int(config.Dims), config.Seed, vecdist.L2Squared)
+			quantizer := quantize.NewRaBitQuantizer(int(config.Dims), config.Seed)
 			store, err := vecstore.New(ctx, m.db, quantizer, m.codec, tableID, indexID)
 			if err != nil {
 				return nil, err
@@ -221,7 +220,6 @@ func (m *Manager) Get(
 
 func (m *Manager) getIndexOptions(config vecpb.Config, readOnly bool) *cspann.IndexOptions {
 	return &cspann.IndexOptions{
-		RotAlgorithm:     cspann.RotAlgorithm(config.RotAlgorithm),
 		MinPartitionSize: int(config.MinPartitionSize),
 		MaxPartitionSize: int(config.MaxPartitionSize),
 		BaseBeamSize:     int(config.BuildBeamSize),
@@ -229,8 +227,7 @@ func (m *Manager) getIndexOptions(config vecpb.Config, readOnly bool) *cspann.In
 		StalledOpTimeout: func() time.Duration {
 			return StalledOpTimeoutSetting.Get(m.sv)
 		},
-		IsDeterministic: config.IsDeterministic,
-		ReadOnly:        readOnly,
+		ReadOnly: readOnly,
 	}
 }
 

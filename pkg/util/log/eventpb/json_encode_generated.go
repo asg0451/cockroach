@@ -3287,7 +3287,9 @@ func (m *HotRangesStats) AppendJSONFields(printComma bool, b redact.RedactableBy
 				b = append(b, ',')
 			}
 			b = append(b, '"')
-			b = redact.RedactableBytes(jsonbytes.EncodeString([]byte(b), v))
+			b = append(b, redact.StartMarker()...)
+			b = redact.RedactableBytes(jsonbytes.EncodeString([]byte(b), string(redact.EscapeMarkers([]byte(v)))))
+			b = append(b, redact.EndMarker()...)
 			b = append(b, '"')
 		}
 		b = append(b, ']')
@@ -3304,7 +3306,9 @@ func (m *HotRangesStats) AppendJSONFields(printComma bool, b redact.RedactableBy
 				b = append(b, ',')
 			}
 			b = append(b, '"')
-			b = redact.RedactableBytes(jsonbytes.EncodeString([]byte(b), v))
+			b = append(b, redact.StartMarker()...)
+			b = redact.RedactableBytes(jsonbytes.EncodeString([]byte(b), string(redact.EscapeMarkers([]byte(v)))))
+			b = append(b, redact.EndMarker()...)
 			b = append(b, '"')
 		}
 		b = append(b, ']')
@@ -3321,7 +3325,9 @@ func (m *HotRangesStats) AppendJSONFields(printComma bool, b redact.RedactableBy
 				b = append(b, ',')
 			}
 			b = append(b, '"')
-			b = redact.RedactableBytes(jsonbytes.EncodeString([]byte(b), v))
+			b = append(b, redact.StartMarker()...)
+			b = redact.RedactableBytes(jsonbytes.EncodeString([]byte(b), string(redact.EscapeMarkers([]byte(v)))))
+			b = append(b, redact.EndMarker()...)
 			b = append(b, '"')
 		}
 		b = append(b, ']')

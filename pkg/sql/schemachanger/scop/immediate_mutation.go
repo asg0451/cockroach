@@ -38,7 +38,6 @@ type NotImplementedForPublicObjects struct {
 	immediateMutationOp
 	ElementType string
 	DescID      catid.DescID
-	TriggerID   catid.TriggerID
 }
 
 // UndoAllInTxnImmediateMutationOpSideEffects undoes the side effects of all

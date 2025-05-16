@@ -174,21 +174,22 @@ This metric is thus not an indicator of KV health.`,
 	}
 	metaCrossZoneBatchRequest = metric.Metadata{
 		Name: "batch_requests.cross_zone.bytes",
-		Help: `Total bytes of batch requests processed cross zones within the same
-		region when zone tiers are configured. If region tiers are not set, it is
-		assumed to be within the same region. To ensure accurate monitoring of
-		cross-zone data transfer, region and zone tiers should be consistently
-		configured across all nodes.`,
+		Help: `Total byte count of batch requests processed cross zone within
+		the same region when region and zone tiers are configured. However, if the
+		region tiers are not configured, this count may also include batch data sent
+		between different regions. Ensuring consistent configuration of region and
+		zone tiers across nodes helps to accurately monitor the data transmitted.`,
 		Measurement: "Bytes",
 		Unit:        metric.Unit_BYTES,
 	}
 	metaCrossZoneBatchResponse = metric.Metadata{
 		Name: "batch_responses.cross_zone.bytes",
-		Help: `Total bytes of batch responses received cross zones within the same
-		region when zone tiers are configured. If region tiers are not set, it is
-		assumed to be within the same region. To ensure accurate monitoring of
-		cross-zone data transfer, region and zone tiers should be consistently
-		configured across all nodes.`,
+		Help: `Total byte count of batch responses received cross zone within the
+		same region when region and zone tiers are configured. However, if the
+		region tiers are not configured, this count may also include batch data
+		received between different regions. Ensuring consistent configuration of
+		region and zone tiers across nodes helps to accurately monitor the data
+		transmitted.`,
 		Measurement: "Bytes",
 		Unit:        metric.Unit_BYTES,
 	}
@@ -308,23 +309,20 @@ func (nm *nodeMetrics) callComplete(d time.Duration, pErr *kvpb.Error) {
 }
 
 // updateCrossLocalityMetricsOnBatchRequest updates nodeMetrics for batch
-// requests processed on the node.
+// requests processed on the node. The metrics being updated include 1. total
+// byte count of batch requests processed 2. cross-region metrics, which monitor
+// activities across different regions, and 3. cross-zone metrics, which monitor
+// activities across different zones within the same region or in cases where
+// region tiers are not configured. These metrics may include batches that were
+// not successfully sent but were terminated at an early stage.
 func (nm *nodeMetrics) updateCrossLocalityMetricsOnBatchRequest(
 	comparisonResult roachpb.LocalityComparisonType, inc int64,
 ) {
-	// Update metrics for total byte count of batch requests processed on the
-	// node.
 	nm.BatchRequestsBytes.Inc(inc)
-	// In cases where both region and zone tiers are not configured,
-	// comparisonResult will be UNDEFINED.
 	switch comparisonResult {
 	case roachpb.LocalityComparisonType_CROSS_REGION:
-		// Update cross-region metrics: monitor activities across different regions.
 		nm.CrossRegionBatchRequestBytes.Inc(inc)
 	case roachpb.LocalityComparisonType_SAME_REGION_CROSS_ZONE:
-		// Update cross-zone metrics: monitor activities across different zones
-		// within the same region. If region tiers are not set, it is assumed to be
-		// within the same region.
 		nm.CrossZoneBatchRequestBytes.Inc(inc)
 	}
 }
@@ -338,8 +336,6 @@ func (nm *nodeMetrics) updateCrossLocalityMetricsOnBatchResponse(
 	comparisonResult roachpb.LocalityComparisonType, inc int64,
 ) {
 	nm.BatchResponsesBytes.Inc(inc)
-	// Read more about locality comparison in
-	// updateCrossLocalityMetricsOnBatchRequest above.
 	switch comparisonResult {
 	case roachpb.LocalityComparisonType_CROSS_REGION:
 		nm.CrossRegionBatchResponseBytes.Inc(inc)
@@ -1169,8 +1165,7 @@ func (n *Node) startPeriodicLivenessCompaction(
 								}.Encode()
 
 							timeBeforeCompaction := timeutil.Now()
-							if err := store.StateEngine().CompactRange(
-								context.Background(), startEngineKey, endEngineKey); err != nil {
+							if err := store.StateEngine().CompactRange(startEngineKey, endEngineKey); err != nil {
 								log.Errorf(ctx, "failed compacting liveness replica: %+v with error: %s", repl, err)
 							}
 
@@ -1195,7 +1190,7 @@ func (n *Node) startPeriodicLivenessCompaction(
 
 // updateNodeRangeCount updates the internal counter of the total ranges across
 // all stores. This value is used to make a decision on whether the node should
-// use expiration leases (see Replica.shouldUseExpirationLease).
+// use expiration leases (see Replica.shouldUseExpirationLeaseRLocked).
 func (n *Node) updateNodeRangeCount() {
 	var count int64
 	_ = n.stores.VisitStores(func(store *kvserver.Store) error {
@@ -1440,6 +1435,7 @@ func startGraphiteStatsExporter(
 			case <-stopper.ShouldQuiesce():
 				return
 			case <-timer.C:
+				timer.Read = true
 				endpoint := graphiteEndpoint.Get(&st.SV)
 				if endpoint != "" {
 					if err := recorder.ExportToGraphite(ctx, endpoint, &pm); err != nil {
@@ -1514,7 +1510,7 @@ func (n *Node) writeNodeStatus(ctx context.Context, mustExist bool) error {
 			}
 			if numNodes > 1 {
 				// Avoid this warning on single-node clusters, which require special UX.
-				log.Warningf(ctx, "health alerts detected: %s", result)
+				log.Warningf(ctx, "health alerts detected: %+v", result)
 			}
 			if err := n.storeCfg.Gossip.AddInfoProto(
 				gossip.MakeNodeHealthAlertKey(n.Descriptor.NodeID), &result, 2*base.DefaultMetricsSampleInterval, /* ttl */
