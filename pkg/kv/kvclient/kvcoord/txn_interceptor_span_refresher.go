@@ -329,7 +329,7 @@ func (sr *txnSpanRefresher) maybeRefreshAndRetrySend(
 	// Try refreshing the txn spans so we can retry.
 	if refreshErr := sr.tryRefreshTxnSpans(ctx, refreshFrom, refreshToTxn); refreshErr != nil {
 		log.Eventf(ctx, "refresh failed; propagating original retry error")
-		// TODO(#146734): We should add refreshErr info to the returned error.
+		// TODO(lidor): we should add refreshErr info to the returned error. See issue #41057.
 		return nil, pErr
 	}
 
@@ -768,9 +768,6 @@ func (sr *txnSpanRefresher) setWrapped(wrapped lockedSender) { sr.wrapped = wrap
 func (sr *txnSpanRefresher) populateLeafInputState(tis *roachpb.LeafTxnInputState) {
 	tis.RefreshInvalid = sr.refreshInvalid
 }
-
-// initializeLeaf is part of the txnInterceptor interface.
-func (*txnSpanRefresher) initializeLeaf(tis *roachpb.LeafTxnInputState) {}
 
 // populateLeafFinalState is part of the txnInterceptor interface.
 func (sr *txnSpanRefresher) populateLeafFinalState(tfs *roachpb.LeafTxnFinalState) {
