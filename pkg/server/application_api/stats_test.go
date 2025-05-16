@@ -7,6 +7,7 @@ package application_api_test
 
 import (
 	"context"
+	gosql "database/sql"
 	"fmt"
 	"reflect"
 	"strings"
@@ -20,7 +21,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/appstatspb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/catconstants"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlstats"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlstats/persistedsqlstats/sqlstatstestutil"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlstats/persistedsqlstats"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/diagutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
@@ -63,8 +64,8 @@ CREATE TABLE t.test (x INT PRIMARY KEY);
 	sqlServer := s.SQLServer().(*sql.Server)
 
 	// Flush stats at the beginning of the test.
-	require.NoError(t, sqlServer.GetLocalSQLStatsProvider().Reset(ctx))
-	require.NoError(t, sqlServer.GetReportedSQLStatsProvider().Reset(ctx))
+	sqlServer.GetSQLStatsController().ResetLocalSQLStats(ctx)
+	sqlServer.GetReportedSQLStatsController().ResetLocalSQLStats(ctx)
 
 	// Run some queries mixed with diagnostics, and ensure that the statistics
 	// are unaffected by the calls to report diagnostics.
@@ -75,14 +76,6 @@ CREATE TABLE t.test (x INT PRIMARY KEY);
 	if _, err := sqlDB.Exec(`INSERT INTO t.test VALUES ($1)`, 2); err != nil {
 		t.Fatal(err)
 	}
-
-	conn := sqlutils.MakeSQLRunner(sqlDB)
-	sqlstatstestutil.WaitForStatementEntriesAtLeast(t, conn, 1,
-		sqlstatstestutil.StatementFilter{
-			ExecCount: 2,
-			Query:     "INSERT INTO t.test VALUES (_)",
-		})
-
 	s.DiagnosticsReporter().(*diagnostics.Reporter).ReportDiagnostics(ctx)
 
 	// Ensure that our SQL statement data was not affected by the telemetry report.
@@ -137,11 +130,9 @@ func TestEnsureSQLStatsAreFlushedForTelemetry(t *testing.T) {
 		sqlConn.Exec(t, tc.stmt)
 	}
 
-	sqlstatstestutil.WaitForStatementEntriesAtLeast(t, sqlConn, len(tcs))
-
 	statusServer := s.StatusServer().(serverpb.StatusServer)
 	sqlServer := s.SQLServer().(*sql.Server)
-	sqlServer.GetSQLStatsProvider().MaybeFlush(ctx, srv.AppStopper())
+	sqlServer.GetSQLStatsProvider().(*persistedsqlstats.PersistedSQLStats).MaybeFlush(ctx, srv.AppStopper())
 	testutils.SucceedsSoon(t, func() error {
 		// Get the diagnostic info.
 		res, err := statusServer.Diagnostics(ctx, &serverpb.DiagnosticsRequest{NodeId: "local"})
@@ -185,12 +176,11 @@ func TestSQLStatCollection(t *testing.T) {
 	defer srv.Stopper().Stop(ctx)
 
 	sqlRunner := sqlutils.MakeSQLRunner(sqlDB)
-	obsConn := sqlutils.MakeSQLRunner(srv.SQLConn(t))
 	sqlServer := srv.ApplicationLayer().SQLServer().(*sql.Server)
 
 	// Flush stats at the beginning of the test.
-	require.NoError(t, sqlServer.GetLocalSQLStatsProvider().Reset(ctx))
-	require.NoError(t, sqlServer.GetReportedSQLStatsProvider().Reset(ctx))
+	sqlServer.GetSQLStatsController().ResetLocalSQLStats(ctx)
+	sqlServer.GetReportedSQLStatsController().ResetLocalSQLStats(ctx)
 
 	// Execute some queries against the sqlDB to build up some stats.
 	// As we are scrubbing the stats, we want to make sure the app name
@@ -202,12 +192,6 @@ func TestSQLStatCollection(t *testing.T) {
 	sqlRunner.Exec(t, `INSERT INTO t.test VALUES (1);`)
 	sqlRunner.Exec(t, `INSERT INTO t.test VALUES (2);`)
 	sqlRunner.Exec(t, `INSERT INTO t.test VALUES (3);`)
-
-	sqlstatstestutil.WaitForStatementEntriesAtLeast(t, obsConn, 3,
-		sqlstatstestutil.StatementFilter{
-			App:       hashedAppName,
-			ExecCount: 5,
-		})
 
 	// Collect stats from the SQL server and ensure our queries are present.
 	stats, err := sqlServer.GetScrubbedStmtStats(ctx)
@@ -230,10 +214,10 @@ func TestSQLStatCollection(t *testing.T) {
 
 	// Reset the SQL statistics, which will dump stats into the
 	// reported statistics pool.
-	require.NoError(t, sqlServer.GetLocalSQLStatsProvider().Reset(ctx))
+	sqlServer.GetSQLStatsController().ResetLocalSQLStats(ctx)
 
 	// Query the reported statistics.
-	stats, err = sqlServer.GetScrubbedReportingStats(ctx, 1000, true)
+	stats, err = sqlServer.GetScrubbedReportingStats(ctx, 1000 /* limit */)
 	require.NoError(t, err)
 
 	foundStat = false
@@ -263,12 +247,6 @@ func TestSQLStatCollection(t *testing.T) {
 	sqlRunner.Exec(t, `INSERT INTO t.test VALUES (6);`)
 	sqlRunner.Exec(t, `CREATE USER us WITH PASSWORD 'pass';`)
 
-	sqlstatstestutil.WaitForStatementEntriesAtLeast(t, obsConn, 2,
-		sqlstatstestutil.StatementFilter{
-			App:       hashedAppName,
-			ExecCount: 4,
-		})
-
 	// Find and record the stats for our second query.
 	stats, err = sqlServer.GetScrubbedStmtStats(ctx)
 	require.NoError(t, err)
@@ -294,10 +272,10 @@ func TestSQLStatCollection(t *testing.T) {
 	}
 
 	// Flush the SQL stats again.
-	require.NoError(t, sqlServer.GetLocalSQLStatsProvider().Reset(ctx))
+	sqlServer.GetSQLStatsController().ResetLocalSQLStats(ctx)
 
 	// Find our statement stat from the reported stats pool.
-	stats, err = sqlServer.GetScrubbedReportingStats(ctx, 1000, true)
+	stats, err = sqlServer.GetScrubbedReportingStats(ctx, 1000 /* limit */)
 	require.NoError(t, err)
 
 	foundStat = false
@@ -328,6 +306,15 @@ func TestSQLStatCollection(t *testing.T) {
 	}
 }
 
+func populateStats(t *testing.T, sqlDB *gosql.DB) {
+	sqlRunner := sqlutils.MakeSQLRunner(sqlDB)
+	sqlRunner.Exec(t, `CREATE DATABASE t;`)
+	sqlRunner.Exec(t, `CREATE TABLE t.test (x INT PRIMARY KEY);`)
+	sqlRunner.Exec(t, `INSERT INTO t.test VALUES (1);`)
+	sqlRunner.Exec(t, `INSERT INTO t.test VALUES (2);`)
+	sqlRunner.Exec(t, `INSERT INTO t.test VALUES (3);`)
+}
+
 func TestClusterResetSQLStats(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
@@ -349,16 +336,12 @@ func TestClusterResetSQLStats(t *testing.T) {
 			gateway := testCluster.Server(1 /* idx */).ApplicationLayer()
 			status := gateway.StatusServer().(serverpb.SQLStatusServer)
 
-			sqlRunner := sqlutils.MakeSQLRunner(gateway.SQLConn(t))
-			sqlRunner.Exec(t, `CREATE DATABASE t;`)
-			sqlRunner.Exec(t, `CREATE TABLE t.test (x INT PRIMARY KEY);`)
-			sqlRunner.Exec(t, `INSERT INTO t.test VALUES (1);`)
-			sqlRunner.Exec(t, `INSERT INTO t.test VALUES (2);`)
-			sqlRunner.Exec(t, `INSERT INTO t.test VALUES (3);`)
+			sqlDB := gateway.SQLConn(t)
 
+			populateStats(t, sqlDB)
 			if flushed {
 				gateway.SQLServer().(*sql.Server).
-					GetSQLStatsProvider().MaybeFlush(ctx, gateway.AppStopper())
+					GetSQLStatsProvider().(*persistedsqlstats.PersistedSQLStats).MaybeFlush(ctx, gateway.AppStopper())
 			}
 
 			statsPreReset, err := status.Statements(ctx, &serverpb.StatementsRequest{
@@ -414,8 +397,8 @@ func TestScrubbedReportingStatsLimit(t *testing.T) {
 	sqlRunner := sqlutils.MakeSQLRunner(sqlDB)
 	sqlServer := srv.ApplicationLayer().SQLServer().(*sql.Server)
 	// Flush stats at the beginning of the test.
-	require.NoError(t, sqlServer.GetLocalSQLStatsProvider().Reset(ctx))
-	require.NoError(t, sqlServer.GetReportedSQLStatsProvider().Reset(ctx))
+	sqlServer.GetSQLStatsController().ResetLocalSQLStats(ctx)
+	sqlServer.GetReportedSQLStatsController().ResetLocalSQLStats(ctx)
 
 	hashedAppName := "hashed app name"
 	sqlRunner.Exec(t, `SET application_name = $1;`, hashedAppName)
@@ -426,18 +409,15 @@ func TestScrubbedReportingStatsLimit(t *testing.T) {
 	sqlRunner.Exec(t, `SELECT * FROM t.test`)
 	sqlRunner.Exec(t, `DELETE FROM t.test WHERE x=5`)
 
-	sqlstatstestutil.WaitForStatementEntriesAtLeast(t, sqlRunner, 6,
-		sqlstatstestutil.StatementFilter{App: hashedAppName})
-
 	// verify that with low limit, number of stats is within that limit
-	require.NoError(t, sqlServer.GetLocalSQLStatsProvider().Reset(ctx))
-	stats, err := sqlServer.GetScrubbedReportingStats(ctx, 5, true)
+	sqlServer.GetSQLStatsController().ResetLocalSQLStats(ctx)
+	stats, err := sqlServer.GetScrubbedReportingStats(ctx, 5 /* limit */)
 	require.NoError(t, err)
 	require.LessOrEqual(t, len(stats), 5)
 
 	// verify that with high limit, the number of	queries is as much as the above
-	require.NoError(t, sqlServer.GetLocalSQLStatsProvider().Reset(ctx))
-	stats, err = sqlServer.GetScrubbedReportingStats(ctx, 1000, true)
+	sqlServer.GetSQLStatsController().ResetLocalSQLStats(ctx)
+	stats, err = sqlServer.GetScrubbedReportingStats(ctx, 1000 /* limit */)
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, len(stats), 7)
 }

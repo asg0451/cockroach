@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
+	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvpb"
@@ -23,7 +24,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/allocator/storepool"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/batcheval"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/benignerror"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/concurrency"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverbase"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverpb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/rditer"
@@ -882,48 +882,12 @@ func (r *Replica) AdminMerge(
 		// Intents have been placed, so the merge is now in its critical phase. Get
 		// a consistent view of the data from the right-hand range. If the merge
 		// commits, we'll write this data to the left-hand range in the merge
-		// trigger. This consistent view is dependent on two things (a) the
-		// SubsumeRequest is evaluated at a leaseholder that is at least as recent
-		// as the leaseholder that evaluated the deletion intent placed on the RHS
-		// RangeDescriptor, (b) the SubsumeRequest freezes the range for new reads
-		// and writes at the leaseholder, and freezes the closed timestamp so
-		// follower reads cannot occur at a timestamp beyond what is accounted for
-		// in SubsumeResponse.ClosedTimestamp (see batcheval.Subsume for more
-		// details).
-		//
-		// When SubsumeRequest does a write (on newer cluster versions), (a) is
-		// guaranteed by the fact that this request needs to be replicated and so
-		// cannot be successfully processed by a stale leaseholder (due to the
-		// protection in RaftCommand.ProposerLeaseSequence). When SubsumeRequest
-		// is a read, it may seem that (a) is not guaranteed since the request
-		// below is sent outside the txn, and does not set a timestamp, so could
-		// be assigned a timestamp lower than the txn timestamp, and routed to an
-		// older leaseholder. The reason this doesn't happen is subtle:
-		// - Say the txn (whose txn coordinator is this node) got assigned a
-		//   timestamp t1.
-		// - The intent put went to the RHS leaseholder which was ahead, at
-		//   timestamp t2. The response to the intent put will bump up the local
-		//   hlc.Timestamp to t2.
-		// - This SubsumeRequest does not set kvpb.Header.Timestamp, but it will
-		//   include in kvpb.Header.Now a value that is >= t2. When this request
-		//   is received by an old leaseholder (the aforementioned hazard), the
-		//   old leaseholder will bump its hlc.Clock to >= t2 and stop being the
-		//   leaseholder, and reject the request. The request will get eventually
-		//   (successfully) retried at a leaseholder that has the lease at
-		//   timestamp >= t2.
-		//
-		// This must be a single request in a BatchRequest: there are multiple
-		// places that do special logic (needed for safety) that rely on
-		// BatchRequest.IsSingleSubsumeRequest() returning true.
-		shouldPreserveLocks := concurrency.UnreplicatedLockReliabilityMerge.Get(&r.ClusterSettings().SV)
+		// trigger.
 		br, pErr := kv.SendWrapped(ctx, r.store.DB().NonTransactionalSender(),
 			&kvpb.SubsumeRequest{
-				RequestHeader: kvpb.RequestHeader{
-					Key: rightDesc.StartKey.AsRawKey(),
-				},
-				PreserveUnreplicatedLocks: shouldPreserveLocks,
-				LeftDesc:                  *origLeftDesc,
-				RightDesc:                 rightDesc,
+				RequestHeader: kvpb.RequestHeader{Key: rightDesc.StartKey.AsRawKey()},
+				LeftDesc:      *origLeftDesc,
+				RightDesc:     rightDesc,
 			})
 		if pErr != nil {
 			return pErr.GoError()
@@ -995,23 +959,13 @@ func (r *Replica) AdminMerge(
 		}
 		if !errors.HasType(err, (*kvpb.TransactionRetryWithProtoRefreshError)(nil)) {
 			if err != nil {
-				return reply, kvpb.NewError(errors.Wrap(err, "merge failed"))
+				return reply, kvpb.NewErrorf("merge failed: %s", err)
 			}
 			return reply, nil
 		}
 	}
 }
 
-// waitForApplication is waiting for application at all replicas (voters or
-// non-voters). This is an outlier in that the system is typically expected to
-// function with only a quorum of voters being available. So it should be used
-// extremely sparingly.
-//
-// IMPORTANT: if adding a call to this method, ensure that whatever command is
-// needing this behavior sets
-// ReplicatedEvalResult.DoTimelyApplicationToAllReplicas. That ensures that
-// replication flow control will not arbitrarily delay application on a
-// replica by maintaining a non-empty send-queue.
 func waitForApplication(
 	ctx context.Context,
 	dialer *nodedialer.Dialer,
@@ -3234,8 +3188,7 @@ var traceSnapshotThreshold = settings.RegisterDurationSetting(
 	"kv.trace.snapshot.enable_threshold",
 	"enables tracing and gathers timing information on all snapshots;"+
 		"snapshots with a duration longer than this threshold will have their "+
-		"trace logged (set to 0 to disable);",
-	0,
+		"trace logged (set to 0 to disable);", 0,
 )
 
 var externalFileSnapshotting = settings.RegisterBoolSetting(
@@ -3305,6 +3258,16 @@ func (r *Replica) followerSendSnapshot(
 	defer snap.Close()
 	log.Event(ctx, "generated snapshot")
 
+	// We avoid shipping over the past Raft log in the snapshot by changing the
+	// truncated state (we're allowed to -- it's an unreplicated key and not
+	// subject to mapping across replicas). The actual sending happens in
+	// kvBatchSnapshotStrategy.Send and results in no log entries being sent at
+	// all. Note that Metadata.Index is really the applied index of the replica.
+	snap.State.TruncatedState = &kvserverpb.RaftTruncatedState{
+		Index: kvpb.RaftIndex(snap.RaftSnap.Metadata.Index),
+		Term:  kvpb.RaftTerm(snap.RaftSnap.Metadata.Term),
+	}
+
 	// See comment on DeprecatedUsingAppliedStateKey for why we need to set this
 	// explicitly for snapshots going out to followers.
 	snap.State.DeprecatedUsingAppliedStateKey = true
@@ -3320,6 +3283,7 @@ func (r *Replica) followerSendSnapshot(
 	// replication, are dealing with a non-system range, are on at
 	// least 24.1, and our store has external files.
 	externalReplicate := !sharedReplicate && nonSystemRange &&
+		r.store.ClusterSettings().Version.IsActive(ctx, clusterversion.V24_1) &&
 		externalFileSnapshotting.Get(&r.store.ClusterSettings().SV)
 	if externalReplicate {
 		start := snap.State.Desc.StartKey.AsRawKey()
@@ -3363,7 +3327,7 @@ func (r *Replica) followerSendSnapshot(
 	sent := func() {
 		r.store.metrics.RangeSnapshotsGenerated.Inc(1)
 	}
-	comparisonResult := r.store.getLocalityComparison(req.CoordinatorReplica.NodeID,
+	comparisonResult := r.store.getLocalityComparison(ctx, req.CoordinatorReplica.NodeID,
 		req.RecipientReplica.NodeID)
 
 	recordBytesSent := func(inc int64) {
@@ -4148,51 +4112,16 @@ func intersectTargets(
 	return intersection
 }
 
-// scatterRangeAndRandomizeLeases does two things: 1. attempts to move replicas
-// of a range using the replicate queue to perform changes upon a range until we
-// hit a terminating error or `maxAttempts`. 2. attempts to transfer lease to a
-// randomly chosen suitable replica. scatterRangeAndRandomizeLeases is
-// best-effort, randomized, and does not guarantee a uniform distribution.
-// Return number of replicas moved based on comparing the state before and after
-// the scatter operation.
-func (r *Replica) scatterRangeAndRandomizeLeases(ctx context.Context, randomizeLeases bool) int {
+// adminScatter moves replicas and leaseholders for a selection of ranges.
+func (r *Replica) adminScatter(
+	ctx context.Context, args kvpb.AdminScatterRequest,
+) (kvpb.AdminScatterResponse, error) {
+	rq := r.store.replicateQueue
 	retryOpts := retry.Options{
 		InitialBackoff: 50 * time.Millisecond,
 		MaxBackoff:     1 * time.Second,
 		Multiplier:     2,
 		MaxRetries:     5,
-	}
-
-	var tokenErr error
-	// Acquire the allocator token explicitly to coordinate replication changes on
-	// the replica, since rq.processOneChange and r.AdminTransferLease bypasses
-	// replicateQueue.process and leaseQueue.process, where the token is normally
-	// acquired. The allocator token is shared by the store rebalancer, replicate
-	// queue, and lease queue to coordinate replication changes on the same range.
-	// Retry if token acquisition failed until the MaxRetries is hit.
-	for re := retry.StartWithCtx(ctx, retryOpts); re.Next(); {
-		tokenErr = r.allocatorToken.TryAcquire(ctx, "admin scatter")
-		if tokenErr == nil {
-			break
-		}
-	}
-
-	// Return early with number of replicas moved as 0.
-	if tokenErr != nil {
-		log.Warningf(ctx, "failed to scatter range: unable to acquire allocator "+
-			"due to %v after %d attempts", tokenErr, retryOpts.MaxRetries)
-		return 0
-	}
-
-	// Successfully acquired the token.
-	defer r.allocatorToken.Release(ctx)
-
-	// Construct a mapping to store the replica IDs before we attempt to scatter
-	// them. This is used to below to check which replicas were actually moved by
-	// the replicate queue .
-	preScatterReplicaIDs := make(map[roachpb.ReplicaID]struct{})
-	for _, rd := range r.Desc().Replicas().Descriptors() {
-		preScatterReplicaIDs[rd.ReplicaID] = struct{}{}
 	}
 
 	// On every `processOneChange` call with the `scatter` option set, stores in
@@ -4207,26 +4136,29 @@ func (r *Replica) scatterRangeAndRandomizeLeases(ctx context.Context, randomizeL
 	maxAttempts := len(r.Desc().Replicas().Descriptors())
 	currentAttempt := 0
 
-	rq := r.store.replicateQueue
+	if args.MaxSize > 0 {
+		if existing, limit := r.GetMVCCStats().Total(), args.MaxSize; existing > limit {
+			return kvpb.AdminScatterResponse{}, errors.Errorf("existing range size %d exceeds specified limit %d", existing, limit)
+		}
+	}
 
-	// Loop until an error occurs or we reach maxAttempts for the range.
-	// maxAttempts is set to the replication factor to ensure we at least attempt
-	// rebalancing for each replica. Separately, MaxRetries (set to 5) controls
-	// the number of retries for retriable errors within each replica attempt
-	// (currentAttempt). Note that there's a backoff between retries for each
-	// currentAttempt, but no backoff between different attempts.
+	// Construct a mapping to store the replica IDs before we attempt to scatter
+	// them. This is used to below to check which replicas were actually moved by
+	// the replicate queue .
+	preScatterReplicaIDs := make(map[roachpb.ReplicaID]struct{})
+	for _, rd := range r.Desc().Replicas().Descriptors() {
+		preScatterReplicaIDs[rd.ReplicaID] = struct{}{}
+	}
+
+	// Loop until we hit an error or until we hit `maxAttempts` for the range.
 	for re := retry.StartWithCtx(ctx, retryOpts); re.Next(); {
 		if currentAttempt == maxAttempts {
-			log.Eventf(ctx, "stopped scattering after hitting max %d attempts", maxAttempts)
 			break
 		}
 		desc, conf := r.DescAndSpanConfig()
 		_, err := rq.replicaCanBeProcessed(ctx, r, false /* acquireLeaseIfNeeded */)
 		if err != nil {
 			// The replica can not be processed, so skip it.
-			log.Warningf(ctx,
-				"failed to scatter range (%v) at %dth attempt: cannot process replica due to %v",
-				desc, currentAttempt+1, err)
 			break
 		}
 		_, err = rq.processOneChange(
@@ -4238,11 +4170,9 @@ func (r *Replica) scatterRangeAndRandomizeLeases(ctx context.Context, randomizeL
 			// issued, in which case the scatter may fail due to the range split
 			// updating the descriptor while processing.
 			if IsRetriableReplicationChangeError(err) {
-				log.Errorf(ctx, "retrying scatter process for range %v after retryable error: %v", desc, err)
+				log.VEventf(ctx, 1, "retrying scatter process after retryable error: %v", err)
 				continue
 			}
-			log.Warningf(ctx, "failed to scatter range (%v) at %dth attempt due to %v",
-				desc, currentAttempt+1, err)
 			break
 		}
 		currentAttempt++
@@ -4253,7 +4183,7 @@ func (r *Replica) scatterRangeAndRandomizeLeases(ctx context.Context, randomizeL
 	// queue would do on its own (#17341), do so after the replicate queue is
 	// done by transferring the lease to any of the given N replicas with
 	// probability 1/N of choosing each.
-	if randomizeLeases && r.OwnsValidLease(ctx, r.store.Clock().NowAsClockTimestamp()) {
+	if args.RandomizeLeases && r.OwnsValidLease(ctx, r.store.Clock().NowAsClockTimestamp()) {
 		desc, conf := r.DescAndSpanConfig()
 		potentialLeaseTargets := r.store.allocator.ValidLeaseTargets(
 			ctx, r.store.cfg.StorePool, desc, conf, desc.Replicas().VoterDescriptors(), r, allocator.TransferLeaseOptions{})
@@ -4261,10 +4191,14 @@ func (r *Replica) scatterRangeAndRandomizeLeases(ctx context.Context, randomizeL
 			newLeaseholderIdx := rand.Intn(len(potentialLeaseTargets))
 			targetStoreID := potentialLeaseTargets[newLeaseholderIdx].StoreID
 			if targetStoreID != r.store.StoreID() {
-				log.VEventf(ctx, 2, "randomly transferring lease to s%d", targetStoreID)
-				if err := r.AdminTransferLease(ctx, targetStoreID, false /* bypassSafetyChecks */); err != nil {
-					log.Warningf(ctx, "scatter lease to s%d failed due to %v: candidates included %v",
-						targetStoreID, err, potentialLeaseTargets)
+				if tokenErr := r.allocatorToken.TryAcquire(ctx, "scatter"); tokenErr != nil {
+					log.Warningf(ctx, "failed to scatter lease to s%d: %+v", targetStoreID, tokenErr)
+				} else {
+					defer r.allocatorToken.Release(ctx)
+					log.VEventf(ctx, 2, "randomly transferring lease to s%d", targetStoreID)
+					if err := r.AdminTransferLease(ctx, targetStoreID, false /* bypassSafetyChecks */); err != nil {
+						log.Warningf(ctx, "failed to scatter lease to s%d: %+v", targetStoreID, err)
+					}
 				}
 			}
 		}
@@ -4280,23 +4214,6 @@ func (r *Replica) scatterRangeAndRandomizeLeases(ctx context.Context, randomizeL
 			numReplicasMoved++
 		}
 	}
-	return numReplicasMoved
-}
-
-// adminScatter moves replicas and leaseholders for a selection of ranges. It is
-// best-effort. Ranges that cannot be moved will just return early and not
-// return an error.
-func (r *Replica) adminScatter(
-	ctx context.Context, args kvpb.AdminScatterRequest,
-) (kvpb.AdminScatterResponse, error) {
-	if args.MaxSize > 0 {
-		if existing, limit := r.GetMVCCStats().Total(), args.MaxSize; existing > limit {
-			return kvpb.AdminScatterResponse{},
-				errors.Errorf("existing range size %d exceeds specified limit %d", existing, limit)
-		}
-	}
-
-	numReplicasMoved := r.scatterRangeAndRandomizeLeases(ctx, args.RandomizeLeases)
 
 	ri := r.GetRangeInfo(ctx)
 	stats := r.GetMVCCStats()
