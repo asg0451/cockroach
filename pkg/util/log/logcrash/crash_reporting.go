@@ -40,12 +40,10 @@ var (
 	// Collecting this data from production clusters helps us understand and improve
 	// how our storage systems behave in real-world use cases.
 	//
-	// Note: while the setting defaults to `true`, it can be overridden with the
+	// Note: while the setting itself is actually defined with a default value of
+	// `false`, it is usually automatically set to `true` when a cluster is created
+	// (or is migrated from a earlier beta version). This can be prevented with the
 	// env var COCKROACH_SKIP_ENABLING_DIAGNOSTIC_REPORTING.
-	//
-	// Note: while this setting also controls crash reporting (see logcrash.ShouldSendReport), the updated setting
-	// isn't affected until after the server startup sequence is complete. Thus, if you also must disable crash reporting
-	// during server startup, you should set the env var `COCKROACH_CRASH_REPORTS=` to the empty value.
 	//
 	// Doing this, rather than just using a default of `true`, means that a node
 	// will not errantly send a report using a default before loading settings.
@@ -53,9 +51,8 @@ var (
 		settings.ApplicationLevel,
 		"diagnostics.reporting.enabled",
 		"enable reporting diagnostic metrics to cockroach labs, but is ignored for Trial or Free licenses",
-		true,
-		settings.WithPublic,
-	)
+		false,
+		settings.WithPublic)
 
 	// CrashReports wraps "diagnostics.reporting.send_crash_reports.enabled".
 	CrashReports = settings.RegisterBoolSetting(

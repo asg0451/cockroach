@@ -31,6 +31,11 @@ const (
 	// perhaps we should fix Pebble to handle large numbers of range tombstones in
 	// an sstable better.
 	ClearRangeThresholdPointKeys = 64
+
+	// ClearRangeThresholdRangeKeys is the threshold (as number of range keys)
+	// beyond which we'll clear range data using a single RANGEKEYDEL across the
+	// span rather than clearing individual range keys.
+	ClearRangeThresholdRangeKeys = 8
 )
 
 // ClearRangeDataOptions specify which parts of a Replica are to be destroyed.
@@ -61,11 +66,7 @@ type ClearRangeDataOptions struct {
 // "CRDB Range" and "storage.ClearRange" context in the setting of this method could
 // be confusing.
 func ClearRangeData(
-	ctx context.Context,
-	rangeID roachpb.RangeID,
-	reader storage.Reader,
-	writer storage.Writer,
-	opts ClearRangeDataOptions,
+	rangeID roachpb.RangeID, reader storage.Reader, writer storage.Writer, opts ClearRangeDataOptions,
 ) error {
 	keySpans := rditer.Select(rangeID, rditer.SelectOpts{
 		ReplicatedBySpan:      opts.ClearReplicatedBySpan,
@@ -73,14 +74,14 @@ func ClearRangeData(
 		UnreplicatedByRangeID: opts.ClearUnreplicatedByRangeID,
 	})
 
-	pointKeyThreshold := ClearRangeThresholdPointKeys
+	pointKeyThreshold, rangeKeyThreshold := ClearRangeThresholdPointKeys, ClearRangeThresholdRangeKeys
 	if opts.MustUseClearRange {
-		pointKeyThreshold = 1
+		pointKeyThreshold, rangeKeyThreshold = 1, 1
 	}
 
 	for _, keySpan := range keySpans {
 		if err := storage.ClearRangeWithHeuristic(
-			ctx, reader, writer, keySpan.Key, keySpan.EndKey, pointKeyThreshold,
+			reader, writer, keySpan.Key, keySpan.EndKey, pointKeyThreshold, rangeKeyThreshold,
 		); err != nil {
 			return err
 		}
@@ -111,7 +112,7 @@ func DestroyReplica(
 	if diskReplicaID.ReplicaID >= nextReplicaID {
 		return errors.AssertionFailedf("replica r%d/%d must not survive its own tombstone", rangeID, diskReplicaID)
 	}
-	if err := ClearRangeData(ctx, rangeID, reader, writer, opts); err != nil {
+	if err := ClearRangeData(rangeID, reader, writer, opts); err != nil {
 		return err
 	}
 
