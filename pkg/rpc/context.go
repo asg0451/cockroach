@@ -143,15 +143,6 @@ func NewServerEx(
 		})
 	})
 
-	// If the metrics interceptor is set, it should be registered second so
-	// that all other interceptors are included in the response time durations.
-	if o.metricsInterceptor != nil {
-		unaryInterceptor = append(unaryInterceptor, grpc.UnaryServerInterceptor(o.metricsInterceptor))
-	}
-
-	// Recover from any uncaught panics caused by DB Console requests.
-	unaryInterceptor = append(unaryInterceptor, grpc.UnaryServerInterceptor(gatewayRequestRecoveryInterceptor))
-
 	if !rpcCtx.ContextOptions.Insecure {
 		a := kvAuth{
 			sv: &rpcCtx.Settings.SV,
@@ -311,8 +302,7 @@ func (c *Context) StoreLivenessWithdrawalGracePeriod() time.Duration {
 // ContextOptions are passed to NewContext to set up a new *Context.
 // All pointer fields and TenantID are required.
 type ContextOptions struct {
-	TenantID   roachpb.TenantID
-	TenantName roachpb.TenantName
+	TenantID roachpb.TenantID
 
 	Clock                  hlc.WallClock
 	ToleratedOffset        time.Duration
@@ -793,7 +783,7 @@ func makeInternalClientAdapter(
 			// look closer to a remote call from the tracing point of view.
 			if separateTracers {
 				sp := tracing.SpanFromContext(ctx)
-				if sp != nil {
+				if sp != nil && !sp.IsNoop() {
 					// Fill in ba.TraceInfo. For remote RPCs (not done throught the
 					// internalClientAdapter), this is done by the TracingInternalClient
 					ba = ba.ShallowCopy()
