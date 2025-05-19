@@ -15,20 +15,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/vecindex/vecpb"
 )
 
-// DeterministicFixupsSetting, if true, makes all background index operations
-// deterministic by:
-//  1. Using a fixed pseudo-random seed for random operations.
-//  2. Using a single background worker that processes fixups.
-//  3. Synchronously running the worker only at prescribed times, e.g. before
-//     running SearchForInsert or SearchForDelete.
-var DeterministicFixupsSetting = settings.RegisterBoolSetting(
-	settings.ApplicationLevel,
-	"sql.vecindex.deterministic_fixups.enabled",
-	"set to true to make all background index operations deterministic, for testing",
-	false,
-	settings.WithVisibility(settings.Reserved),
-)
-
 // StalledOpTimeoutSetting specifies how long a split/merge operation can remain
 // in its current state before another fixup worker may attempt to assist. If
 // this is set too high, then a fixup can get stuck for too long. If it is set
@@ -62,19 +48,7 @@ func CheckEnabled(sv *settings.Values) error {
 	return nil
 }
 
-// MakeVecConfig constructs a new VecConfig that's compatible with the given
-// type.
+// MakeVecConfig constructs a new VecConfig with Dims and Seed set.
 func MakeVecConfig(evalCtx *eval.Context, typ *types.T) vecpb.Config {
-	// Dimensions are derived from the vector type. By default, use Givens
-	// rotations to mix input vectors.
-	config := vecpb.Config{Dims: typ.Width(), RotAlgorithm: int32(cspann.RotGivens)}
-	if DeterministicFixupsSetting.Get(&evalCtx.Settings.SV) {
-		// Set well-known seed and deterministic fixups.
-		config.Seed = 42
-		config.IsDeterministic = true
-	} else {
-		// Use random seed.
-		config.Seed = evalCtx.GetRNG().Int63()
-	}
-	return config
+	return vecpb.Config{Dims: typ.Width(), Seed: evalCtx.GetRNG().Int63()}
 }

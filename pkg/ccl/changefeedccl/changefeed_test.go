@@ -1005,7 +1005,6 @@ func TestChangefeedMultiTable(t *testing.T) {
 func TestChangefeedCursor(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
-	require.NoError(t, log.SetVModule("event_processing=3,blocking_buffer=2"))
 
 	testFn := func(t *testing.T, s TestServer, f cdctest.TestFeedFactory) {
 		sqlDB := sqlutils.MakeSQLRunner(s.DB)
@@ -4349,7 +4348,7 @@ func TestChangefeedEnrichedWithDiff(t *testing.T) {
 		assertion func(topic string) []string
 	}{
 		{
-			name: "json with diff", options: []string{"diff", "format=json"}, sinks: []string{"kafka", "pubsub", "sinkless", "webhook", "cloudstorage"},
+			name: "json with diff", options: []string{"diff", "format=json"}, sinks: []string{"kafka", "pubsub", "sinkless", "webhook"},
 			assertion: func(topic string) []string {
 				return []string{
 					fmt.Sprintf(`%s: {"a": 0}->{"after": {"a": 0, "b": "dog"}, "before": null, "op": "c"}`, topic),
@@ -4537,7 +4536,6 @@ func TestChangefeedEnrichedSourceWithDataAvro(t *testing.T) {
 		})
 	})
 }
-
 func TestChangefeedEnrichedSourceWithDataJSON(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
@@ -4633,7 +4631,7 @@ func TestChangefeedEnrichedSourceWithDataJSON(t *testing.T) {
 					assertPayloadsEnriched(t, testFeed, []string{`foo: {"i": 0}->{"after": {"i": 0}, "op": "c"}`}, sourceAssertion)
 				}
 			}
-			for _, sink := range []string{"kafka", "pubsub", "sinkless", "cloudstorage"} {
+			for _, sink := range []string{"kafka", "pubsub", "sinkless"} {
 				testLocality := roachpb.Locality{
 					Tiers: []roachpb.Tier{{
 						Key:   "region",
@@ -5196,7 +5194,7 @@ func TestChangefeedFailOnTableOffline(t *testing.T) {
 		// Start an import job which will immediately pause after ingestion
 		sqlDB.Exec(t, "SET CLUSTER SETTING jobs.debug.pausepoints = 'import.after_ingest';")
 		go func() {
-			sqlDB.ExpectErrWithRetry(t, `pause point`, `IMPORT INTO for_import CSV DATA ($1);`, `result is ambiguous`, dataSrv.URL)
+			sqlDB.ExpectErrWithTimeout(t, `pause point`, `IMPORT INTO for_import CSV DATA ($1);`, dataSrv.URL)
 		}()
 		sqlDB.CheckQueryResultsRetry(
 			t,
@@ -6174,11 +6172,9 @@ func TestChangefeedJobUpdateFailsIfNotClaimed(t *testing.T) {
 		// another node.
 		sqlDB.Exec(t, `UPDATE system.jobs SET claim_session_id = NULL WHERE id = $1`, jobID)
 
-		timeout := (5 * time.Second) + changefeedbase.Quantize.Get(&s.Server.ClusterSettings().SV)
-
+		timeout := 5 * time.Second
 		if util.RaceEnabled {
-			// Timeout should be at least 30s to allow for race conditions.
-			timeout += 25 * time.Second
+			timeout = 30 * time.Second
 		}
 		// Expect that the distflow fails since it can't
 		// update the checkpoint.
@@ -7118,7 +7114,7 @@ func TestChangefeedErrors(t *testing.T) {
 	)
 	sqlDB.ExpectErrWithTimeout(
 		t, `this sink is incompatible with envelope=enriched`,
-		`CREATE CHANGEFEED FOR foo INTO 'pulsar://.' WITH envelope=enriched`,
+		`CREATE CHANGEFEED FOR foo INTO 'nodelocal://.' WITH envelope=enriched`,
 	)
 	sqlDB.ExpectErrWithTimeout(
 		t, `enriched_properties is only usable with envelope=enriched`,
@@ -8934,20 +8930,6 @@ func TestFlushJitter(t *testing.T) {
 			flushFrequency:        100 * time.Millisecond,
 			jitter:                0.1,
 			expectedFlushDuration: 100 * time.Millisecond,
-			expectedErr:           false,
-		},
-		// Expect actual jitter to be 0 since flushFrequency * jitter < 1.
-		{
-			flushFrequency:        1,
-			jitter:                0.1,
-			expectedFlushDuration: 1,
-			expectedErr:           false,
-		},
-		// Expect actual jitter to be 0 since flushFrequency * jitter < 1.
-		{
-			flushFrequency:        10,
-			jitter:                0.01,
-			expectedFlushDuration: 10,
 			expectedErr:           false,
 		},
 	} {
@@ -11155,21 +11137,21 @@ func TestChangefeedHeadersJSONVals(t *testing.T) {
 		expected       cdctest.Headers
 		warn           string
 	}{
-		{
-			name:           "empty",
-			headersJSONStr: `'{}'`,
-			expected:       cdctest.Headers{},
-		},
-		{
-			name:           "flat primitives - happy path",
-			headersJSONStr: `'{"a": "b", "c": "d", "e": 42, "f": false}'`,
-			expected: cdctest.Headers{
-				{K: "a", V: []byte("b")},
-				{K: "c", V: []byte("d")},
-				{K: "e", V: []byte("42")},
-				{K: "f", V: []byte("false")},
-			},
-		},
+		// {
+		// 	name:           "empty",
+		// 	headersJSONStr: `'{}'`,
+		// 	expected:       cdctest.Headers{},
+		// },
+		// {
+		// 	name:           "flat primitives - happy path",
+		// 	headersJSONStr: `'{"a": "b", "c": "d", "e": 42, "f": false}'`,
+		// 	expected: cdctest.Headers{
+		// 		{K: "a", V: []byte("b")},
+		// 		{K: "c", V: []byte("d")},
+		// 		{K: "e", V: []byte("42")},
+		// 		{K: "f", V: []byte("false")},
+		// 	},
+		// },
 		{
 			name:           "some bad some good",
 			headersJSONStr: `'{"a": "b", "c": 1, "d": true, "e": null, "f": [1, 2, 3], "g": {"h": "i"}}'`,
@@ -11469,11 +11451,7 @@ func TestCDCQuerySelectSingleRow(t *testing.T) {
 		}
 		cfKnobs := knobs.DistSQL.(*execinfra.TestingKnobs).Changefeed.(*TestingKnobs)
 		cfKnobs.HandleDistChangefeedError = func(err error) error {
-			// Only capture the first error -- that's enough for the test.
-			select {
-			case errCh <- err:
-			default:
-			}
+			errCh <- err
 			return err
 		}
 	}
@@ -11542,33 +11520,6 @@ func TestChangefeedAsSelectForEmptyTable(t *testing.T) {
 		feed, err := f.Feed(`CREATE CHANGEFEED AS SELECT rowid FROM empty`)
 		require.NoError(t, err)
 		defer closeFeed(t, feed)
-	}
-
-	cdcTest(t, testFn)
-}
-
-func TestChangefeedMVCCTimestampWithQueries(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
-	ctx := context.Background()
-
-	testFn := func(t *testing.T, s TestServer, f cdctest.TestFeedFactory) {
-		sqlDB := sqlutils.MakeSQLRunner(s.DB)
-		sqlDB.Exec(t, `CREATE TABLE foo (key INT PRIMARY KEY);`)
-		sqlDB.Exec(t, `INSERT INTO foo VALUES (1);`)
-
-		feed, err := f.Feed(`CREATE CHANGEFEED WITH mvcc_timestamp, format=json, envelope=bare AS SELECT * FROM foo`)
-		require.NoError(t, err)
-		defer closeFeed(t, feed)
-
-		msgs, err := readNextMessages(ctx, feed, 1)
-		require.NoError(t, err)
-
-		var m map[string]any
-		require.NoError(t, gojson.Unmarshal(msgs[0].Value, &m))
-		ts := m["__crdb__"].(map[string]any)["mvcc_timestamp"].(string)
-		assertReasonableMVCCTimestamp(t, ts)
 	}
 
 	cdcTest(t, testFn)

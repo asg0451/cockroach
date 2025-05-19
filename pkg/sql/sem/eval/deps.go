@@ -535,7 +535,7 @@ type PreparedStatementState interface {
 	// HasActivePortals returns true if there are portals in the session.
 	HasActivePortals() bool
 	// MigratablePreparedStatements returns a mapping of all prepared statements.
-	MigratablePreparedStatements() ([]sessiondatapb.MigratableSession_PreparedStatement, error)
+	MigratablePreparedStatements() []sessiondatapb.MigratableSession_PreparedStatement
 	// HasPortal returns true if there exists a given named portal in the session.
 	HasPortal(s string) bool
 }
@@ -711,6 +711,7 @@ type GossipOperator interface {
 type SQLStatsController interface {
 	ResetClusterSQLStats(ctx context.Context) error
 	ResetActivityTables(ctx context.Context) error
+	ResetInsightsTables(ctx context.Context) error
 	CreateSQLStatsCompactionSchedule(ctx context.Context) error
 }
 

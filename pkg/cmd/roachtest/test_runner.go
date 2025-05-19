@@ -26,6 +26,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/DataExMachina-dev/side-eye-go/sideeyeclient"
 	"github.com/cockroachdb/cockroach/pkg/build"
 	"github.com/cockroachdb/cockroach/pkg/cli/exit"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachprod/grafana"
@@ -108,16 +109,6 @@ var (
 		)
 	}
 
-	// liveMigrationError indicates that a test failed and also experienced
-	// a live migration. These errors are directed to Test Eng instead of owning teams.
-	liveMigrationError = func(liveMigrationVMs string) error {
-		return registry.ErrorWithOwner(
-			registry.OwnerTestEng, fmt.Errorf("liveMigrationError VMs: %s", liveMigrationVMs),
-			registry.WithTitleOverride("live_migration_error"),
-			registry.InfraFlake,
-		)
-	}
-
 	prng, _ = randutil.NewLockedPseudoRand()
 
 	runID string
@@ -176,6 +167,10 @@ type testRunner struct {
 
 	// Counts cluster creation errors across all workers.
 	numClusterErrs int32
+
+	// sideEyeClient, if set, is the client used to communicate with the Side-Eye
+	// debugging service.
+	sideEyeClient *sideeyeclient.SideEyeClient
 }
 
 type perfMetricsCollector struct {
@@ -239,6 +234,9 @@ type clustersOpt struct {
 
 	// Controls whether the cluster is cleaned up at the end of the test.
 	debugMode debugMode
+	// sideEyeToken, if not empty, is the token used to authenticate with the
+	// Side-Eye. If set, each node in the cluster will run the Side-Eye agent.
+	sideEyeToken string
 
 	// preAllocateClusterFn is a function called right before allocating a
 	// cluster. It allows the caller to e.g. inject errors for testing.
@@ -347,7 +345,7 @@ func (r *testRunner) Run(
 
 	clusterFactory := newClusterFactory(
 		clustersOpt.user, clustersOpt.clusterID, lopt.artifactsDir,
-		r.cr, numConcurrentClusterCreations(),
+		r.cr, numConcurrentClusterCreations(), r.sideEyeClient,
 	)
 
 	n := len(tests)
@@ -559,6 +557,7 @@ func (r *testRunner) allocateOrAttachToCluster(
 		username:     clustersOpt.user,
 		localCluster: clustersOpt.typ == localCluster,
 		arch:         arch,
+		sideEyeToken: clustersOpt.sideEyeToken,
 	}
 	return clusterFactory.newCluster(ctx, cfg, wStatus.SetStatus, lopt.tee)
 }
@@ -793,6 +792,21 @@ func (r *testRunner) runWorker(
 
 		wStatus.SetCluster(c)
 
+		// If the Side-Eye integration is active, update the cluster's Side-Eye
+		// environment name to match the current test; this makes it easier to
+		// identify this cluster on app.side-eye.io.
+		if c != nil && r.sideEyeClient != nil {
+			testSuffix := ""
+			if testToRun.runCount > 1 {
+				testSuffix = fmt.Sprintf("#%d", testToRun.runNum)
+			}
+			envName := fmt.Sprintf("%s-%s%s", runID, testToRun.spec.Name, testSuffix)
+			err := c.UpdateSideEyeEnvironmentName(ctx, l, envName)
+			if err != nil {
+				l.ErrorfCtx(ctx, "failed to update Side-Eye environment name: %s", err)
+			}
+		}
+
 		// Prepare the test's logger. Always set this up with real files, using a
 		// temp dir if necessary. This simplifies testing.
 		artifactsRootDir := lopt.artifactsDir
@@ -851,7 +865,7 @@ func (r *testRunner) runWorker(
 
 			params := getTestParameters(t, github.cluster, github.vmCreateOpts)
 			logTestParameters(l, params)
-			if _, err := github.MaybePost(t, l, t.failureMsg(), params); err != nil {
+			if _, err := github.MaybePost(t, l, t.failureMsg(), "" /* sideEyeTimeoutSnapshotURL */, params); err != nil {
 				shout(ctx, l, stdout, "failed to post issue: %s", err)
 			}
 		}
@@ -936,26 +950,15 @@ func (r *testRunner) runWorker(
 				// Apply metamorphic settings not explicitly defined by the test.
 				// These settings should only be applied to non-benchmark tests.
 				if !testSpec.Benchmark {
-					// 50% chance of enabling the rangefeed buffered sender.
-					// 50% change of enabling buffered writes.
-					//
-					// Disabled by default. Disabled for mixed-version tests
-					// since these cluster settings are not supported in all
-					// versions.
-					for _, tc := range []struct {
-						setting string
-						label   string
-					}{
-						{setting: "kv.rangefeed.buffered_sender.enabled", label: "metamorphicBufferedSender"},
-						{setting: "kv.transaction.write_buffering.enabled", label: "metamorphicWriteBuffering"},
-					} {
-						enable := prng.Intn(2) == 0
-						if !t.spec.Suites.Contains(registry.MixedVersion) && enable {
-							c.clusterSettings[tc.setting] = "true"
-							c.status(fmt.Sprintf("metamorphically setting %q to 'true'", tc.setting))
-							t.AddParam(tc.label, fmt.Sprint(enable))
-						}
+					// 50% chance of enabling the rangefeed buffered sender. Disabled by
+					// default. Disabled for mixed-version tests since this cluster setting
+					// is only supported in >= v25.2.
+					useBufferedSender := prng.Intn(2) == 0
+					if !t.spec.Suites.Contains(registry.MixedVersion) && useBufferedSender {
+						c.clusterSettings["kv.rangefeed.buffered_sender.enabled"] = "true"
 					}
+					c.status(fmt.Sprintf("metamorphically using buffered sender: %t", useBufferedSender))
+					t.AddParam("metamorphicBufferedSender", fmt.Sprint(useBufferedSender))
 				}
 
 				c.goCoverDir = t.GoCoverArtifactsDir()
@@ -1153,6 +1156,10 @@ func (r *testRunner) runTest(
 		c.grafanaTags = []string{vm.SanitizeLabel(runID), vm.SanitizeLabel(testRunID), vm.SanitizeLabel(c.Name())}
 	}
 
+	// sideEyeTimeoutSnapshotURL may be set during teardown to communicate to the
+	// deferred function below that a Side-Eye snapshot was taken for a timed out
+	// test.
+	sideEyeTimeoutSnapshotURL := ""
 	defer func() {
 		t.end = timeutil.Now()
 		if err := c.removeLabels([]string{VmLabelTestName, VmLabelTestOwner}); err != nil {
@@ -1212,17 +1219,11 @@ func (r *testRunner) runTest(
 					t.resetFailures()
 					t.Error(vmHostError(hostErrorVMNames))
 				}
-				liveMigrationVMNames := getLiveMigrationVMNames(c, l)
-				if liveMigrationVMNames != "" {
-					failureMsg = fmt.Sprintf("VMs had live migrations during the test run: %s\n\n**Other Failures:**\n%s", liveMigrationVMNames, failureMsg)
-					t.resetFailures()
-					t.Error(liveMigrationError(hostErrorVMNames))
-				}
 
 				output := fmt.Sprintf("%s\ntest artifacts and logs in: %s", failureMsg, t.ArtifactsDir())
 				params := getTestParameters(t, github.cluster, github.vmCreateOpts)
 				logTestParameters(l, params)
-				issue, err := github.MaybePost(t, l, output, params)
+				issue, err := github.MaybePost(t, l, output, sideEyeTimeoutSnapshotURL, params)
 				if err != nil {
 					shout(ctx, l, stdout, "failed to post issue: %s", err)
 				}
@@ -1437,8 +1438,15 @@ func (r *testRunner) runTest(
 	// operations originating from the test vs the harness. The only error that can originate here
 	// is from artifact collection, which is best effort and for which we do not fail the test.
 	replaceLogger("test-teardown")
-	if err := r.teardownTest(ctx, t, c, timedOut); err != nil {
+	var err error
+	sideEyeTimeoutSnapshotURL, err = r.teardownTest(ctx, t, c, timedOut)
+	if err != nil {
 		l.PrintfCtx(ctx, "error during test teardown: %v; see test-teardown.log for details", err)
+	}
+	// If we captured a Side-Eye snapshot during teardown, log it to the test's
+	// original logger (in addition to the teardown logger used in teardownTest).
+	if sideEyeTimeoutSnapshotURL != "" {
+		l.PrintfCtx(ctx, "A Side-Eye cluster snapshot was captured: %s", sideEyeTimeoutSnapshotURL)
 	}
 }
 
@@ -1491,18 +1499,6 @@ func getHostErrorVMNames(ctx context.Context, c *clusterImpl, l *logger.Logger) 
 	}
 
 	return getVMNames(hostErrorVMs)
-}
-
-// getLiveMigrationVMNames returns a comma separated list of VMs that
-// experienced a live migration over the duration of the test.
-func getLiveMigrationVMNames(c *clusterImpl, l *logger.Logger) string {
-	liveMigrationVMs, err := c.GetLiveMigrationVMs(l)
-	if err != nil {
-		l.Printf("failed to check live migrations:\n%+v", err)
-		return ""
-	}
-
-	return strings.Join(liveMigrationVMs, ", ")
 }
 
 // The assertions here are executed after each test, and may result in a test failure. Test authors
@@ -1607,9 +1603,12 @@ func (r *testRunner) postTestAssertions(
 
 // teardownTest is best effort and should not fail a test.
 // Errors during artifact collection will be propagated up.
+//
+// The string return value, if not empty, represents the URL of a Side-Eye
+// snapshot of the cluster taken before teardown.
 func (r *testRunner) teardownTest(
 	ctx context.Context, t *testImpl, c *clusterImpl, timedOut bool,
-) error {
+) (string, error) {
 	defer func() {
 		// Terminate tasks to ensure that any stray tasks are cleaned up.
 		t.L().Printf("terminating tasks")
@@ -1617,6 +1616,11 @@ func (r *testRunner) teardownTest(
 	}()
 
 	if timedOut || t.Failed() || roachtestflags.AlwaysCollectArtifacts {
+		snapURL := ""
+		if timedOut {
+			snapURL = c.CaptureSideEyeSnapshot(ctx)
+		}
+
 		err := r.collectArtifacts(ctx, t, c, timedOut, time.Hour)
 		if err != nil {
 			t.L().Printf("error collecting artifacts: %v", err)
@@ -1634,7 +1638,7 @@ func (r *testRunner) teardownTest(
 			}
 			t.L().Printf("test timed out; check __stacks.log and CRDB logs for goroutine dumps")
 		}
-		return err
+		return snapURL, err
 	}
 
 	// Test was successful. If we are collecting code coverage, copy the files now.
@@ -1664,7 +1668,7 @@ func (r *testRunner) teardownTest(
 		t.L().Printf("Retrieving pprof artifacts")
 		getCpuProfileArtifacts(ctx, c, t)
 	}
-	return nil
+	return "", nil
 }
 
 func (r *testRunner) collectArtifacts(
@@ -1909,6 +1913,10 @@ func (r *testRunner) serveHTTP(wr http.ResponseWriter, req *http.Request) {
 			} else {
 				clusterBuilder.WriteString(clusterName)
 			}
+			sideEyeEnv := w.Cluster().sideEyeEnvName()
+			if sideEyeEnv != "" {
+				clusterBuilder.WriteString(fmt.Sprintf(" (<a href='%s'>Side-Eye</a>)", sideeyeclient.RecordingsURL(sideEyeEnv)))
+			}
 		}
 		t := w.Test()
 		testStatus := "N/A"
@@ -1982,6 +1990,30 @@ func (r *testRunner) getCompletedTests() []completedTestInfo {
 	return res
 }
 
+// maybeInitSideEyeClient initializes the test runner's Side-Eye client if
+// configured to do so. The API token to use for communicating with Side-Eye is
+// returned. Returns "" if the Side-Eye integration is not configured. All
+// errors are logged and swallowed.
+func (r *testRunner) maybeInitSideEyeClient(ctx context.Context, l *logger.Logger) string {
+	token := roachtestflags.SideEyeApiToken
+	if token == "" {
+		return ""
+	}
+	if roachtestflags.Local {
+		l.Printf("--side-eye-token is ignored in --local mode. The Side-Eye agents will not be started; " +
+			"you can run the agent manually.")
+		return ""
+	}
+
+	client, err := sideeyeclient.NewSideEyeClient(sideeyeclient.WithApiToken(token))
+	if err != nil {
+		l.Errorf("failed to create Side-Eye client: %s", err)
+	} else {
+		r.sideEyeClient = client
+	}
+	return token
+}
+
 func (r *testRunner) postProcessPerfMetrics(
 	ctx context.Context, t *testImpl, c *clusterImpl, dstDirFn func(nodeIdx int) string,
 ) {
@@ -2014,7 +2046,7 @@ func (m *perfMetricsCollector) collectFromNodes(
 			continue
 		}
 		m.perfNodes = append(m.perfNodes, node)
-		if err := m.processFiles(files, log); err != nil {
+		if err := m.processFiles(files); err != nil {
 			return errors.Wrapf(err, "error while processing files")
 		}
 	}
@@ -2035,7 +2067,7 @@ func (m *perfMetricsCollector) findMetricsFiles(dirPath string) ([]string, error
 	return files, err
 }
 
-func (m *perfMetricsCollector) processFiles(files []string, log *logger.Logger) error {
+func (m *perfMetricsCollector) processFiles(files []string) error {
 	for _, file := range files {
 		fileBytes, err := os.ReadFile(file)
 		if err != nil {
@@ -2044,9 +2076,7 @@ func (m *perfMetricsCollector) processFiles(files []string, log *logger.Logger) 
 
 		histograms, labels, err := roachtestutil.GetHistogramMetrics(bytes.NewBuffer(fileBytes))
 		if err != nil {
-			// This file didn't have valid histograms, continue with other files
-			log.Errorf("error getting histogram metrics for file %s: %v", file, err)
-			continue
+			return errors.Wrapf(err, "getting histogram metrics")
 		}
 
 		m.histogramMetrics.Summaries = append(m.histogramMetrics.Summaries, histograms.Summaries...)

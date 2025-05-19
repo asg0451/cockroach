@@ -11,7 +11,6 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/sql/vecindex/cspann"
 	"github.com/cockroachdb/cockroach/pkg/sql/vecindex/cspann/quantize"
-	"github.com/cockroachdb/cockroach/pkg/sql/vecindex/cspann/vecdist"
 	"github.com/cockroachdb/cockroach/pkg/sql/vecindex/vecencoding"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/vector"
@@ -23,8 +22,8 @@ func TestCodec(t *testing.T) {
 
 	// Create test vectors and partitions
 	dims := 4
-	rootQuantizer := quantize.NewUnQuantizer(dims, vecdist.L2Squared)
-	nonRootQuantizer := quantize.NewRaBitQuantizer(dims, 42, vecdist.L2Squared)
+	rootQuantizer := quantize.NewUnQuantizer(dims)
+	nonRootQuantizer := quantize.NewRaBitQuantizer(dims, 42)
 
 	// Create sample vectors
 	vectors := []vector.T{

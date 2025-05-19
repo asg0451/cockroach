@@ -26,7 +26,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverpb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/liveness/livenesspb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/logstore"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/print"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/raftlog"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/uncertainty"
 	"github.com/cockroachdb/cockroach/pkg/raft"
@@ -876,6 +875,19 @@ func (r *Replica) handleRaftReady(
 	return r.handleRaftReadyRaftMuLocked(ctx, inSnap)
 }
 
+func (r *Replica) attachRaftEntriesMonitorRaftMuLocked() {
+	r.raftMu.bytesAccount = r.store.cfg.RaftEntriesMonitor.NewAccount(
+		r.store.metrics.RaftLoadedEntriesBytes)
+}
+
+func (r *Replica) detachRaftEntriesMonitorRaftMuLocked() {
+	// Return all the used bytes back to the limiter.
+	r.raftMu.bytesAccount.Clear()
+	// De-initialize the account so that log storage Entries() calls don't track
+	// the entries anymore.
+	r.raftMu.bytesAccount = logstore.BytesAccount{}
+}
+
 // handleRaftReadyRaftMuLocked is the same as handleRaftReady but requires that
 // the replica's raftMu be held.
 //
@@ -946,7 +958,6 @@ func (r *Replica) handleRaftReadyRaftMuLocked(
 	leaderID := r.shMu.leaderID
 	lastLeaderID := leaderID
 
-	shouldResetLastReplicaAdded := r.shouldResetLastReplicaAdded()
 	r.mu.Lock()
 	err := r.withRaftGroupLocked(func(raftGroup *raft.RawNode) (bool, error) {
 		r.deliverLocalRaftMsgsRaftMuLockedReplicaMuLocked(ctx, raftGroup)
@@ -994,12 +1005,6 @@ func (r *Replica) handleRaftReadyRaftMuLocked(
 	})
 	r.mu.applyingEntries = !ready.Committed.Empty()
 	pausedFollowers := r.mu.pausedFollowers
-	if shouldResetLastReplicaAdded {
-		// Since we already hold the Replica.mu lock, reset the lastReplicaAdded
-		// here if we need to.
-		r.mu.lastReplicaAdded = 0
-		r.mu.lastReplicaAddedTime = time.Time{}
-	}
 	r.mu.Unlock()
 	if errors.Is(err, errRemoved) {
 		// If we've been removed then just return.
@@ -1009,7 +1014,7 @@ func (r *Replica) handleRaftReadyRaftMuLocked(
 	}
 
 	if hasReady {
-		r.maybeLogRaftReadyRaftMuLocked(ctx, ready)
+		logRaftReady(ctx, ready)
 	}
 	// Even if we don't have a Ready, or entries in Ready,
 	// replica_rac2.Processor may need to do some work.
@@ -1061,11 +1066,11 @@ func (r *Replica) handleRaftReadyRaftMuLocked(
 		// from log storage, and ignores the in-memory unstable entries. Consider a
 		// more complete flow control mechanism here, and eliminating the plumbing
 		// hack with the bytesAccount.
-		r.asLogStorage().attachRaftEntriesMonitorRaftMuLocked()
+		r.attachRaftEntriesMonitorRaftMuLocked()
 		// We apply committed entries during this handleRaftReady, so it is ok to
 		// release the corresponding memory tokens at the end of this func. Next
 		// time we enter this function, the account will be empty again.
-		defer r.asLogStorage().detachRaftEntriesMonitorRaftMuLocked()
+		defer r.detachRaftEntriesMonitorRaftMuLocked()
 		if toApply, err = logSnapshot.Slice(
 			ready.Committed, r.store.cfg.RaftMaxCommittedSizePerReady,
 		); err != nil {
@@ -1182,7 +1187,7 @@ func (r *Replica) handleRaftReadyRaftMuLocked(
 			defer releaseMergeLock()
 
 			stats.tSnapBegin = crtime.NowMono()
-			if err := r.applySnapshotRaftMuLocked(ctx, inSnap, snap, app.HardState, subsumedRepls); err != nil {
+			if err := r.applySnapshot(ctx, inSnap, snap, app.HardState, subsumedRepls); err != nil {
 				return stats, errors.Wrap(err, "while applying snapshot")
 			}
 			for _, msg := range app.Responses {
@@ -1200,7 +1205,7 @@ func (r *Replica) handleRaftReadyRaftMuLocked(
 			stats.tSnapEnd = crtime.NowMono()
 			stats.snap.applied = true
 
-			// The raft log state was updated in applySnapshotRaftMuLocked, but we also want to
+			// The raft log state was updated in applySnapshot, but we also want to
 			// reflect these changes in the state variable here.
 			// TODO(pav-kv): this is unnecessary. We only do it because there is an
 			// unconditional storing of this state below. Avoid doing it twice.
@@ -1369,7 +1374,6 @@ func (r *Replica) handleRaftReadyRaftMuLocked(
 		// send-queue for the new leaseholder.
 		r.store.scheduler.EnqueueRaftReady(r.RangeID)
 	}
-	r.maybeInitOrResetLastUpdateTimes(lastLeaderID, r.shMu.leaderID /* currentLeaderId */)
 
 	// NB: All early returns other than the one due to not having a ready
 	// which also makes the below call are due to fatal errors.
@@ -1796,7 +1800,7 @@ func (r *Replica) maybeCoalesceHeartbeat(
 type replicaSyncCallback Replica
 
 func (r *replicaSyncCallback) OnLogSync(
-	ctx context.Context, ack raft.StorageAppendAck, stats logstore.WriteStats,
+	ctx context.Context, ack raft.StorageAppendAck, commitStats storage.BatchCommitStats,
 ) {
 	repl := (*Replica)(r)
 	// The log mark is non-empty only if this was a non-empty log append that
@@ -1810,10 +1814,8 @@ func (r *replicaSyncCallback) OnLogSync(
 	}
 	// Send MsgStorageAppend's responses.
 	repl.sendStorageAck(ctx, ack, false /* willDeliver */)
-
-	r.store.metrics.RaftLogCommitLatency.RecordValue(stats.CommitDur.Nanoseconds())
-	if stats.TotalDuration > defaultReplicaRaftMuWarnThreshold {
-		log.Infof(repl.raftCtx, "slow non-blocking raft commit: %s", stats.BatchCommitStats)
+	if commitStats.TotalDuration > defaultReplicaRaftMuWarnThreshold {
+		log.Infof(repl.raftCtx, "slow non-blocking raft commit: %s", commitStats)
 	}
 }
 
@@ -2381,7 +2383,7 @@ func (r *Replica) maybeCampaignOnWakeLocked(ctx context.Context) {
 	raftStatus := r.mu.internalRaftGroup.BasicStatus()
 	livenessMap, _ := r.store.livenessMap.Load().(livenesspb.IsLiveMap)
 	if shouldCampaignOnWake(leaseStatus, r.store.StoreID(), raftStatus, livenessMap, r.descRLocked(),
-		r.requiresExpirationLease(r.descRLocked()), now.ToTimestamp()) {
+		r.requiresExpirationLeaseRLocked(), now.ToTimestamp()) {
 		r.campaignLocked(ctx)
 	}
 }
@@ -2936,9 +2938,9 @@ func handleTruncatedStateBelowRaftPreApply(
 	prev kvserverpb.RaftTruncatedState,
 	next kvserverpb.RaftTruncatedState,
 	loader logstore.StateLoader,
-	writer storage.Writer,
+	readWriter storage.ReadWriter,
 ) error {
-	return logstore.Compact(ctx, prev, next, loader, writer)
+	return logstore.Compact(ctx, prev, next, loader, readWriter)
 }
 
 // shouldCampaignAfterConfChange returns true if the current replica should
@@ -3035,7 +3037,7 @@ func (r *Replica) printRaftTail(
 			Key:   mvccKey,
 			Value: v,
 		}
-		sb.WriteString(truncateEntryString(print.SprintMVCCKeyValue(kv, true /* printKey */), 2000))
+		sb.WriteString(truncateEntryString(SprintMVCCKeyValue(kv, true /* printKey */), 2000))
 		sb.WriteRune('\n')
 
 		valid, err := it.PrevEngineKey()
@@ -3076,44 +3078,6 @@ func (r *Replica) updateLastUpdateTimesUsingStoreLivenessRLocked(
 			r.mu.lastUpdateTimes.update(desc.ReplicaID, r.Clock().PhysicalTime())
 		}
 	}
-}
-
-// maybeInitOrResetLastUpdateTimes initializes or resets the lastUpdateTimes
-// on leadership changes.
-func (r *Replica) maybeInitOrResetLastUpdateTimes(
-	lastLeaderID roachpb.ReplicaID, currentLeaderId roachpb.ReplicaID,
-) {
-	if lastLeaderID == currentLeaderId {
-		// There has been no leadership change, so we don't need to do anything.
-		return
-	}
-
-	// Only on leadership changes we take the replica mutex and initialize or
-	// reset the lastUpdateTimes map.
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.replicaID == currentLeaderId {
-		// We are the new leader, initialize the lastUpdateTimes map.
-		r.mu.lastUpdateTimes = make(map[roachpb.ReplicaID]time.Time)
-		r.mu.lastUpdateTimes.updateOnBecomeLeader(r.shMu.state.Desc.Replicas().Descriptors(),
-			r.Clock().PhysicalTime())
-	} else {
-		// We're becoming a follower, reset the lastUpdateTimes map.
-		r.mu.lastUpdateTimes = nil
-	}
-}
-
-// shouldResetLastReplicaAdded returns true is the last replica added has caught
-// up with the leader.
-func (r *Replica) shouldResetLastReplicaAdded() bool {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	if pr := r.mu.internalRaftGroup.ReplicaProgress(raftpb.PeerID(r.mu.lastReplicaAdded)); pr != nil {
-		if kvpb.RaftIndex(pr.Match) >= kvpb.RaftIndex(r.raftBasicStatusRLocked().Commit) {
-			return true
-		}
-	}
-	return false
 }
 
 func truncateEntryString(s string, maxChars int) string {

@@ -143,7 +143,7 @@ func (ct *cdcTester) startStatsCollection() func() {
 			startTime,
 			endTime,
 			[]clusterstats.AggQuery{sqlServiceLatencyAgg, changefeedThroughputAgg, cpuUsageAgg},
-			func(stats map[string]clusterstats.StatSummary) *roachtestutil.AggregatedMetric {
+			func(stats map[string]clusterstats.StatSummary) (string, float64) {
 				// TODO(jayant): update this metric to be more accurate.
 				// It may be worth plugging in real latency values from the latency
 				// verifier here in the future for more accuracy. However, it may not be
@@ -151,14 +151,7 @@ func (ct *cdcTester) startStatsCollection() func() {
 				// up as roachtest failures, we don't need to make them very apparent in
 				// roachperf. Note that other roachperf stats, such as the aggregate stats
 				// above, will be accurate.
-				duration := endTime.Sub(startTime).Minutes()
-				return &roachtestutil.AggregatedMetric{
-					Name:             "Total Run Time (mins)",
-					Value:            roachtestutil.MetricPoint(duration),
-					Unit:             "minutes",
-					IsHigherBetter:   false,
-					AdditionalLabels: nil,
-				}
+				return "Total Run Time (mins)", endTime.Sub(startTime).Minutes()
 			},
 		)
 		if err != nil {
@@ -778,16 +771,10 @@ func newCDCTester(ctx context.Context, t test.Test, c cluster.Cluster, opts ...o
 
 	startOpts, settings := makeCDCBenchOptions(c)
 
-	// With a target_duration of 10s, we won't see slow span logs from changefeeds until we are > 100s
+	// With a target_duration of 10s, we won't see slow span logs from changefeeds untils we are > 100s
 	// behind, which is well above the 60s targetSteadyLatency we have in some tests.
 	settings.ClusterSettings["changefeed.slow_span_log_threshold"] = "30s"
 	settings.ClusterSettings["server.child_metrics.enabled"] = "true"
-
-	// Randomly set a quantization interval since metamorphic settings
-	// don't extend to roachtests.
-	quantization := fmt.Sprintf("%ds", rand.Intn(30))
-	settings.ClusterSettings["changefeed.resolved_timestamp.granularity"] = quantization
-	t.Status(fmt.Sprintf("changefeed.resolved_timestamp.granularity: %s", quantization))
 
 	settings.Env = append(settings.Env, envVars...)
 
@@ -1191,216 +1178,6 @@ func runCDCInitialScanRollingRestart(
 	}
 }
 
-type fineGrainedCheckpointingParams struct {
-	numRanges               int
-	transientErrorFrequency time.Duration
-	rangeDelays             []time.Duration
-	maxVal                  int
-}
-
-// runCDCFineGrainedCheckpointingBenchmark runs a changefeed
-// on a 4-node cluster, using node 1 as the coordinator. It will split the
-// table into many ranges and start a sink which will be artificially slower
-// on some of the ranges so that our fine grained checkpoints are exercised.
-// This sink will also occasionally error which should force restarts and
-// restore from these fine-grained checkpoints.
-func runCDCFineGrainedCheckpointingBenchmark(
-	ctx context.Context, t test.Test, c cluster.Cluster, params fineGrainedCheckpointingParams,
-) {
-	if len(params.rangeDelays) > params.numRanges {
-		t.Fatalf("too many range delays provided")
-	}
-
-	ips, err := c.ExternalIP(ctx, t.L(), c.Node(c.Spec().NodeCount))
-	if err != nil {
-		t.Fatal(err)
-	}
-	sinkURL := fmt.Sprintf("https://%s:%d", ips[0], debug.WebhookServerPort)
-	sink := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}}
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	c.Start(ctx, t.L(), option.DefaultStartOpts(), install.MakeClusterSettings())
-	m := c.NewMonitor(ctx, c.All())
-
-	db := c.Conn(ctx, t.L(), 1)
-
-	startTime := timeutil.Now()
-
-	startStatsCollection := func() func(roachtestutil.MetricPoint) {
-		promCfg := (&prometheus.Config{}).
-			WithPrometheusNode(c.Node(4).InstallNodes()[0]).
-			WithCluster(c.Nodes(1, 2, 3, 4).InstallNodes()).
-			WithNodeExporter(c.Nodes(1, 2, 3, 4).InstallNodes()).
-			WithGrafanaDashboardJSON(grafana.ChangefeedRoachtestGrafanaDashboardJSON)
-
-		promCfg.Grafana.Enabled = true
-
-		err := c.StartGrafana(ctx, t.L(), promCfg)
-		if err != nil {
-			t.Errorf("error starting prometheus/grafana: %s", err)
-		}
-		nodeURLs, err := c.ExternalIP(ctx, t.L(), c.Node(4))
-		if err != nil {
-			t.Errorf("error getting grafana node external ip: %s", err)
-		}
-		t.Status(fmt.Sprintf("started grafana at http://%s:3000/d/928XNlN4k/basic?from=now-15m&to=now", nodeURLs[0]))
-
-		promClient, err := clusterstats.SetupCollectorPromClient(ctx, c, t.L(), promCfg)
-		if err != nil {
-			t.Errorf("error creating prometheus client for stats collector: %s", err)
-		}
-
-		return func(dupesPercentage roachtestutil.MetricPoint) {
-			statsCollector := clusterstats.NewStatsCollector(ctx, promClient)
-			_, err = statsCollector.Exporter().Export(ctx, c, t, false, /* dryRun */
-				startTime,
-				timeutil.Now(),
-				[]clusterstats.AggQuery{changefeedThroughputAgg, cpuUsageAgg},
-				func(stats map[string]clusterstats.StatSummary) *roachtestutil.AggregatedMetric {
-					return &roachtestutil.AggregatedMetric{
-						Name:             "Dupes percentage",
-						Value:            dupesPercentage,
-						Unit:             "percent",
-						IsHigherBetter:   false,
-						AdditionalLabels: nil,
-					}
-				},
-			)
-
-			if err != nil {
-				t.Errorf("error exporting stats file: %s", err)
-			}
-		}
-	}()
-
-	t.L().Printf("setting up test data...")
-	setupStmts := []string{
-		`CREATE TABLE foo (id INT PRIMARY KEY, val INT)`,
-		`SET CLUSTER SETTING changefeed.span_checkpoint.interval = '1s'`,
-		`SET CLUSTER SETTING changefeed.shutdown_checkpoint.enabled = 'false'`,
-		`SET CLUSTER SETTING changefeed.frontier_highwater_lag_checkpoint_threshold = '100ms'`,
-		`SET CLUSTER SETTING changefeed.frontier_checkpoint_frequency = '1s'`,
-		// We do not set timestamp quantization here since it is off by default
-		`SET CLUSTER SETTING kv.rangefeed.enabled = true`,
-	}
-
-	values := []string{}
-	for i := 0; i < params.numRanges; i++ {
-		values = append(values, fmt.Sprintf("(%d, 0)", i*10))
-	}
-	setupStmts = append(setupStmts, fmt.Sprintf("INSERT INTO foo VALUES %s", strings.Join(values, ", ")))
-	setupStmts = append(setupStmts, fmt.Sprintf("ALTER TABLE foo SPLIT AT SELECT generate_series(0, %d, 10)", params.numRanges*10))
-
-	for _, s := range setupStmts {
-		t.L().Printf(s)
-		if _, err := db.Exec(s); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	delayStrings := []string{}
-	for _, delay := range params.rangeDelays {
-		delayStrings = append(delayStrings, fmt.Sprint(delay.Milliseconds()))
-	}
-
-	// Run the sink server.
-	m.Go(func(ctx context.Context) error {
-		t.L().Printf("starting up sink server at %s...", sinkURL)
-		err := c.RunE(ctx, option.WithNodes(c.Node(c.Spec().NodeCount)),
-			fmt.Sprintf("./cockroach workload debug webhook-server-slow %d %s", params.transientErrorFrequency.Milliseconds(), strings.Join(delayStrings, " ")))
-		if err != nil {
-			return err
-		}
-		return nil
-	})
-
-	defer func() {
-		_, err := sink.Get(sinkURL + "/exit")
-		t.L().Printf("exiting webhook sink status: %v", err)
-	}()
-
-	t.L().Printf("starting changefeed...")
-	var job int
-	if err := db.QueryRow(
-		fmt.Sprintf("CREATE CHANGEFEED FOR TABLE foo INTO 'webhook-%s/?insecure_tls_skip_verify=true' WITH initial_scan='no', updated", sinkURL),
-	).Scan(&job); err != nil {
-		t.Fatal(err)
-	}
-
-	var inserts []string
-	for i := 0; i < params.numRanges; i++ {
-		for j := 1; j < 10; j++ {
-			inserts = append(inserts, fmt.Sprintf("(%d, 0)", i*10+j))
-		}
-	}
-
-	sql := "INSERT INTO foo (id, val) VALUES " + strings.Join(inserts, ",")
-	if _, err := db.Exec(sql); err != nil {
-		t.Fatal(err)
-	}
-
-	for c := 1; c <= params.maxVal; c++ {
-		if _, err := db.Exec(fmt.Sprintf(
-			"UPDATE foo SET val = %d", c)); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	t.L().Printf("waiting for changefeed %d...", job)
-
-	get := func(p string) (int, error) {
-		b, err := sink.Get(sinkURL + p)
-		if err != nil {
-			return 0, err
-		}
-		body, err := io.ReadAll(b.Body)
-		if err != nil {
-			return 0, err
-		}
-		i, err := strconv.Atoi(string(body))
-		if err != nil {
-			return 0, err
-		}
-		return i, nil
-	}
-
-	// 10 keys per range are each updated maxVal + 1 times
-	// except for one key per range which is set to 0 before
-	// the changefeed starts and only updated maxVal times.
-	expected := 10*params.numRanges*(params.maxVal+1) - params.numRanges
-	t.L().Printf("expecting %d rows", expected)
-
-	var dupes int
-	testutils.SucceedsWithin(t, func() error {
-		unique, err := get("/unique")
-		if err != nil {
-			return err
-		}
-		dupes, err = get("/dupes")
-		if err != nil {
-			return err
-		}
-		t.L().Printf("sink got %d unique, %d dupes", unique, dupes)
-
-		if unique != expected {
-			return fmt.Errorf("expected %d, got %d", expected, unique)
-		}
-
-		return nil
-	}, 30*time.Minute)
-
-	dupesPercentage := 100 * (float64(dupes) / float64(expected))
-	dupesPercentageMetricPoint := roachtestutil.MetricPoint(dupesPercentage)
-	t.L().Printf("sink got %d dupes, which is %f percent of the total number of unique messages", dupes, dupesPercentage)
-
-	startStatsCollection(dupesPercentageMetricPoint)
-	t.L().Printf("changefeed complete, checking sink...")
-	_, err = sink.Get(sinkURL + "/reset")
-	t.L().Printf("resetting sink %v", err)
-}
-
 // This test verifies that the changefeed avro + confluent schema registry works
 // end-to-end (including the schema registry default of requiring backward
 // compatibility within a topic).
@@ -1692,41 +1469,12 @@ func registerCDC(r registry.Registry) {
 		},
 	})
 	r.Add(registry.TestSpec{
-		Name:             "cdc/fine-grained-checkpointing",
+		Name:             "cdc/tpcc-1000/sink=kafka",
 		Owner:            registry.OwnerCDC,
 		Benchmark:        true,
-		Cluster:          r.MakeClusterSpec(4),
+		Cluster:          r.MakeClusterSpec(4, spec.WorkloadNode(), spec.CPU(16)),
+		Leases:           registry.MetamorphicLeases,
 		CompatibleClouds: registry.AllClouds,
-		Suites:           registry.Suites(registry.Nightly),
-		Timeout:          30 * time.Minute,
-		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
-			runCDCFineGrainedCheckpointingBenchmark(ctx, t, c, fineGrainedCheckpointingParams{
-				numRanges:               1000,
-				transientErrorFrequency: 500 * time.Millisecond,
-				rangeDelays: []time.Duration{
-					2 * time.Millisecond,
-					4 * time.Millisecond,
-					8 * time.Millisecond,
-					16 * time.Millisecond,
-					32 * time.Millisecond,
-					2 * time.Millisecond,
-					4 * time.Millisecond,
-					8 * time.Millisecond,
-					16 * time.Millisecond,
-					32 * time.Millisecond,
-				},
-				maxVal: 100,
-			})
-		},
-	})
-	r.Add(registry.TestSpec{
-		Name:      "cdc/tpcc-1000/sink=kafka",
-		Owner:     registry.OwnerCDC,
-		Benchmark: true,
-		Cluster:   r.MakeClusterSpec(4, spec.WorkloadNode(), spec.CPU(16)),
-		Leases:    registry.MetamorphicLeases,
-		// Disabled on IBM due to lack of Kafka support on s390x.
-		CompatibleClouds: registry.AllClouds.NoIBM(),
 		Suites:           registry.Suites(registry.Nightly),
 		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
 			ct := newCDCTester(ctx, t, c)
@@ -1885,8 +1633,7 @@ func registerCDC(r registry.Registry) {
 		Cluster:   r.MakeClusterSpec(4, spec.CPU(16), spec.WorkloadNode()),
 		Leases:    registry.MetamorphicLeases,
 		// TODO(radu): fix this.
-		// Disabled on IBM due to lack of Kafka support on s390x.
-		CompatibleClouds: registry.AllClouds.NoIBM(),
+		CompatibleClouds: registry.AllClouds,
 		Suites:           registry.ManualOnly,
 		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
 			ct := newCDCTester(ctx, t, c)
@@ -1907,13 +1654,12 @@ func registerCDC(r registry.Registry) {
 		},
 	})
 	r.Add(registry.TestSpec{
-		Name:      "cdc/initial-scan",
-		Owner:     registry.OwnerCDC,
-		Benchmark: true,
-		Cluster:   r.MakeClusterSpec(4, spec.CPU(16), spec.WorkloadNode()),
-		Leases:    registry.MetamorphicLeases,
-		// Disabled on IBM due to lack of Kafka support on s390x.
-		CompatibleClouds: registry.AllClouds.NoAWS().NoIBM(),
+		Name:             "cdc/initial-scan",
+		Owner:            registry.OwnerCDC,
+		Benchmark:        true,
+		Cluster:          r.MakeClusterSpec(4, spec.CPU(16), spec.WorkloadNode()),
+		Leases:           registry.MetamorphicLeases,
+		CompatibleClouds: registry.AllExceptAWS,
 		Suites:           registry.Suites(registry.Nightly),
 		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
 			ct := newCDCTester(ctx, t, c)
@@ -1930,13 +1676,12 @@ func registerCDC(r registry.Registry) {
 		},
 	})
 	r.Add(registry.TestSpec{
-		Name:      "cdc/kafka-chaos",
-		Owner:     `cdc`,
-		Benchmark: true,
-		Cluster:   r.MakeClusterSpec(4, spec.CPU(16), spec.WorkloadNode()),
-		Leases:    registry.MetamorphicLeases,
-		// Disabled on IBM due to lack of Kafka support on s390x.
-		CompatibleClouds: registry.AllClouds.NoAWS().NoIBM(),
+		Name:             "cdc/kafka-chaos",
+		Owner:            `cdc`,
+		Benchmark:        true,
+		Cluster:          r.MakeClusterSpec(4, spec.CPU(16), spec.WorkloadNode()),
+		Leases:           registry.MetamorphicLeases,
+		CompatibleClouds: registry.AllExceptAWS,
 		Suites:           registry.Suites(registry.Nightly),
 		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
 			ct := newCDCTester(ctx, t, c)
@@ -1962,12 +1707,11 @@ func registerCDC(r registry.Registry) {
 		},
 	})
 	r.Add(registry.TestSpec{
-		Name:    "cdc/kafka-chaos-single-row",
-		Owner:   `cdc`,
-		Cluster: r.MakeClusterSpec(4, spec.CPU(16), spec.WorkloadNode()),
-		Leases:  registry.MetamorphicLeases,
-		// Disabled on IBM due to lack of Kafka support on s390x.
-		CompatibleClouds: registry.AllClouds.NoAWS().NoIBM(),
+		Name:             "cdc/kafka-chaos-single-row",
+		Owner:            `cdc`,
+		Cluster:          r.MakeClusterSpec(4, spec.CPU(16), spec.WorkloadNode()),
+		Leases:           registry.MetamorphicLeases,
+		CompatibleClouds: registry.AllExceptAWS,
 		Suites:           registry.Suites(registry.Nightly),
 		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
 			ct := newCDCTester(ctx, t, c)
@@ -2040,13 +1784,12 @@ func registerCDC(r registry.Registry) {
 		},
 	})
 	r.Add(registry.TestSpec{
-		Name:      "cdc/crdb-chaos",
-		Owner:     `cdc`,
-		Benchmark: true,
-		Cluster:   r.MakeClusterSpec(4, spec.CPU(16), spec.WorkloadNode()),
-		Leases:    registry.MetamorphicLeases,
-		// Disabled on IBM due to lack of Kafka support on s390x.
-		CompatibleClouds: registry.AllClouds.NoAWS().NoIBM(),
+		Name:             "cdc/crdb-chaos",
+		Owner:            `cdc`,
+		Benchmark:        true,
+		Cluster:          r.MakeClusterSpec(4, spec.CPU(16), spec.WorkloadNode()),
+		Leases:           registry.MetamorphicLeases,
+		CompatibleClouds: registry.AllExceptAWS,
 		Suites:           registry.Suites(registry.Nightly),
 		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
 			ct := newCDCTester(ctx, t, c)
@@ -2081,11 +1824,10 @@ func registerCDC(r registry.Registry) {
 		// TODO(mrtracy): This workload is designed to be running on a 20CPU nodes,
 		// but this cannot be allocated without some sort of configuration outside
 		// of this test. Look into it.
-		Benchmark: true,
-		Cluster:   r.MakeClusterSpec(4, spec.CPU(16), spec.WorkloadNode()),
-		Leases:    registry.MetamorphicLeases,
-		// Disabled on IBM due to lack of Kafka support on s390x.
-		CompatibleClouds:           registry.AllClouds.NoAWS().NoIBM(),
+		Benchmark:                  true,
+		Cluster:                    r.MakeClusterSpec(4, spec.CPU(16), spec.WorkloadNode()),
+		Leases:                     registry.MetamorphicLeases,
+		CompatibleClouds:           registry.AllExceptAWS,
 		Suites:                     registry.Suites(registry.Nightly),
 		RequiresDeprecatedWorkload: true, // uses ledger
 		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
@@ -2339,10 +2081,9 @@ func registerCDC(r registry.Registry) {
 		Owner:     `cdc`,
 		Benchmark: true,
 		// Only Kafka 3 supports Arm64, but the broker setup for Oauth used only works with Kafka 2
-		Cluster: r.MakeClusterSpec(4, spec.WorkloadNode(), spec.Arch(vm.ArchAMD64)),
-		Leases:  registry.MetamorphicLeases,
-		// Disabled on IBM due to lack of Kafka support on s390x.
-		CompatibleClouds: registry.AllClouds.NoAWS().NoIBM(),
+		Cluster:          r.MakeClusterSpec(4, spec.WorkloadNode(), spec.Arch(vm.ArchAMD64)),
+		Leases:           registry.MetamorphicLeases,
+		CompatibleClouds: registry.AllExceptAWS,
 		Suites:           registry.Suites(registry.Nightly),
 		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
 			if c.Cloud() == spec.Local && runtime.GOARCH == "arm64" {
@@ -2384,12 +2125,11 @@ func registerCDC(r registry.Registry) {
 		},
 	})
 	r.Add(registry.TestSpec{
-		Name:    "cdc/kafka-topics",
-		Owner:   `cdc`,
-		Cluster: r.MakeClusterSpec(4, spec.WorkloadNode(), spec.Arch(vm.ArchAMD64)),
-		Leases:  registry.MetamorphicLeases,
-		// Disabled on IBM due to lack of Kafka support on s390x.
-		CompatibleClouds: registry.AllClouds.NoAWS().NoIBM(),
+		Name:             "cdc/kafka-topics",
+		Owner:            `cdc`,
+		Cluster:          r.MakeClusterSpec(4, spec.WorkloadNode(), spec.Arch(vm.ArchAMD64)),
+		Leases:           registry.MetamorphicLeases,
+		CompatibleClouds: registry.AllExceptAWS,
 		Suites:           registry.Suites(registry.Nightly),
 		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
 			ct := newCDCTester(ctx, t, c)
@@ -2540,12 +2280,11 @@ func registerCDC(r registry.Registry) {
 		},
 	})
 	r.Add(registry.TestSpec{
-		Name:    "cdc/bank",
-		Owner:   `cdc`,
-		Cluster: r.MakeClusterSpec(4, spec.WorkloadNode()),
-		Leases:  registry.MetamorphicLeases,
-		// Disabled on IBM due to lack of Kafka support on s390x.
-		CompatibleClouds: registry.AllClouds.NoAWS().NoIBM(),
+		Name:             "cdc/bank",
+		Owner:            `cdc`,
+		Cluster:          r.MakeClusterSpec(4, spec.WorkloadNode()),
+		Leases:           registry.MetamorphicLeases,
+		CompatibleClouds: registry.AllExceptAWS,
 		Suites:           registry.Suites(registry.Nightly),
 		Timeout:          60 * time.Minute,
 		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
@@ -2553,12 +2292,11 @@ func registerCDC(r registry.Registry) {
 		},
 	})
 	r.Add(registry.TestSpec{
-		Name:    "cdc/schemareg",
-		Owner:   `cdc`,
-		Cluster: r.MakeClusterSpec(1),
-		Leases:  registry.MetamorphicLeases,
-		// Disabled on IBM due to lack of Kafka support on s390x.
-		CompatibleClouds: registry.AllClouds.NoAWS().NoIBM(),
+		Name:             "cdc/schemareg",
+		Owner:            `cdc`,
+		Cluster:          r.MakeClusterSpec(1),
+		Leases:           registry.MetamorphicLeases,
+		CompatibleClouds: registry.AllExceptAWS,
 		Suites:           registry.Suites(registry.Nightly),
 		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
 			runCDCSchemaRegistry(ctx, t, c)
@@ -4073,6 +3811,8 @@ rm -f go.mod go.sum
 go mod init create-msk-topic
 go mod tidy
 go build .
+
+./create-msk-topic --broker "$1" --topic "$2" --role-arn "$3"
 `, createMSKTopicBinPath)
 
 // CreateTopic creates a topic on the MSK cluster.
@@ -4082,21 +3822,8 @@ func (m *mskManager) CreateTopic(ctx context.Context, topic string, c cluster.Cl
 
 	require.NoError(m.t, c.RunE(ctx, withCTN, "mkdir", "-p", createMSKTopicBinPath))
 	require.NoError(m.t, c.PutString(ctx, createMskTopicMain, path.Join(createMSKTopicBinPath, "main.go"), 0700, createTopicNode))
-	require.NoError(m.t, c.PutString(ctx, setupMskTopicScript,
-		path.Join(createMSKTopicBinPath, "setup.sh"), 0700, createTopicNode))
-	require.NoError(m.t, c.RunE(ctx, withCTN,
-		path.Join(createMSKTopicBinPath, "setup.sh"), m.connectInfo.broker, topic, mskRoleArn))
-	retryOpts := retry.Options{
-		InitialBackoff: 1 * time.Minute,
-		MaxBackoff:     5 * time.Minute,
-	}
-	require.NoError(m.t, retry.WithMaxAttempts(ctx, retryOpts, 3,
-		func() error {
-			return c.RunE(ctx, withCTN,
-				path.Join(createMSKTopicBinPath, "create-msk-topic"),
-				"--broker", m.connectInfo.broker, "--topic", topic, "--role-arn", mskRoleArn)
-
-		}))
+	require.NoError(m.t, c.PutString(ctx, setupMskTopicScript, path.Join(createMSKTopicBinPath, "run.sh"), 0700, createTopicNode))
+	require.NoError(m.t, c.RunE(ctx, withCTN, path.Join(createMSKTopicBinPath, "run.sh"), m.connectInfo.broker, topic, mskRoleArn))
 }
 
 // TearDown deletes the MSK cluster.

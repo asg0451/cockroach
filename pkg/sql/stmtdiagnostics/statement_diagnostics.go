@@ -32,6 +32,7 @@ var pollingInterval = settings.RegisterDurationSetting(
 	"sql.stmt_diagnostics.poll_interval",
 	"rate at which the stmtdiagnostics.Registry polls for requests, set to zero to disable",
 	10*time.Second,
+	settings.NonNegativeDuration,
 )
 
 var bundleChunkSize = settings.RegisterByteSizeSetting(
@@ -202,6 +203,7 @@ func (r *Registry) poll(ctx context.Context) {
 		case <-pollIntervalChanged:
 			continue // go back around and maybe reset the timer
 		case <-timer.C:
+			timer.Read = true
 		case <-ctx.Done():
 			return
 		}

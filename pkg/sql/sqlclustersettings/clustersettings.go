@@ -129,8 +129,8 @@ var LDRImmediateModeWriter = settings.RegisterStringSetting(
 	settings.ApplicationLevel,
 	"logical_replication.consumer.immediate_mode_writer",
 	"the writer to use when in immediate mode",
-	// TODO(jeffswenson): make the sql writer the default.
-	//metamorphic.ConstantWithTestChoice("logical_replication.consumer.immediate_mode_writer", string(LDRWriterTypeSQL), string(LDRWriterTypeLegacyKV), string(LDRWriterTypeCRUD)),
+	// TODO(jeffswenson): re-enable the SQL writer once tombstone handling is fixed
+	// metamorphic.ConstantWithTestChoice("logical_replication.consumer.immediate_mode_writer", string(writerTypeSQL), string(writerTypeLegacyKV), string(writerTypeCRUD)),
 	metamorphic.ConstantWithTestChoice("logical_replication.consumer.immediate_mode_writer", string(LDRWriterTypeLegacyKV)),
 	settings.WithValidateString(func(sv *settings.Values, val string) error {
 		if val != string(LDRWriterTypeSQL) && val != string(LDRWriterTypeLegacyKV) && val != string(LDRWriterTypeCRUD) {

@@ -30,11 +30,11 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/funcdesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/schemadesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/schemaexpr"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/typedesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/oidext"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
-	"github.com/cockroachdb/cockroach/pkg/sql/prep"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/builtins"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/builtins/builtinsregistry"
@@ -996,22 +996,7 @@ func populateTableConstraints(
 				}
 				conoid = h.PrimaryKeyConstraintOid(db.GetID(), sc.GetID(), table.GetID(), uwi)
 				contype = conTypePKey
-				primaryIdxStr, err := catformat.IndexForDisplay(
-					ctx,
-					table,
-					&descpb.AnonymousTable,
-					table.GetPrimaryIndex(),
-					"", /* partition */
-					tree.FmtSimple,
-					p.EvalContext(),
-					p.SemaCtx(),
-					p.SessionData(),
-					catformat.IndexDisplayDefOnly,
-				)
-				if err != nil {
-					return err
-				}
-				condef = tree.NewDString(primaryIdxStr)
+				condef = tree.NewDString(tabledesc.PrimaryKeyString(table))
 			} else {
 				f := tree.NewFmtCtx(tree.FmtSimple)
 				conoid = h.UniqueConstraintOid(db.GetID(), sc.GetID(), table.GetID(), uwi)
@@ -2497,7 +2482,7 @@ https://www.postgresql.org/docs/9.6/view-pg-prepared-statements.html`,
 	schema: vtable.PGCatalogPreparedStatements,
 	populate: func(ctx context.Context, p *planner, dbContext catalog.DatabaseDescriptor, addRow func(...tree.Datum) error) error {
 		for name, stmt := range p.preparedStatements.List() {
-			placeholderTypes := stmt.Metadata.PlaceholderTypesInfo.Types
+			placeholderTypes := stmt.PrepareMetadata.PlaceholderTypesInfo.Types
 			paramTypes := tree.NewDArray(types.RegType)
 			paramTypes.Array = make(tree.Datums, len(placeholderTypes))
 			paramNames := make([]string, len(placeholderTypes))
@@ -2518,11 +2503,11 @@ https://www.postgresql.org/docs/9.6/view-pg-prepared-statements.html`,
 			}
 
 			fromSQL := tree.DBoolFalse
-			if stmt.Origin() == prep.StatementOriginSQL {
+			if stmt.origin == PreparedStatementOriginSQL {
 				fromSQL = tree.DBoolTrue
 			}
 
-			ts, err := tree.MakeDTimestampTZ(stmt.CreatedAt(), time.Microsecond)
+			ts, err := tree.MakeDTimestampTZ(stmt.createdAt, time.Microsecond)
 			if err != nil {
 				return err
 			}

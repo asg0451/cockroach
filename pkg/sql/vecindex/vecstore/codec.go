@@ -187,10 +187,11 @@ func (pc *partitionCodec) setStoreCodec(partitionKey cspann.PartitionKey) {
 func encodeVectorFromSet(vs quantize.QuantizedVectorSet, idx int) ([]byte, error) {
 	switch t := vs.(type) {
 	case *quantize.UnQuantizedVectorSet:
-		return vecencoding.EncodeUnquantizerVector([]byte{}, t.Vectors.At(idx))
+		return vecencoding.EncodeUnquantizerVector(
+			[]byte{}, t.CentroidDistances[idx], t.Vectors.At(idx))
 	case *quantize.RaBitQuantizedVectorSet:
 		return vecencoding.EncodeRaBitQVector(
-			[]byte{}, t.CodeCounts[idx], t.CentroidDistances[idx], t.QuantizedDotProducts[idx], t.Codes.At(idx),
+			[]byte{}, t.CodeCounts[idx], t.CentroidDistances[idx], t.DotProducts[idx], t.Codes.At(idx),
 		), nil
 	}
 	return nil, errors.Errorf("unknown quantizer type %T", vs)

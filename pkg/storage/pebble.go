@@ -178,38 +178,33 @@ var readaheadModeSpeculative = settings.RegisterEnumSetting(
 
 // CompressionAlgorithm is an enumeration of available compression algorithms
 // available.
-type CompressionAlgorithm int64
+type compressionAlgorithm int64
 
-// These values end up being the underlying value of the cluster setting, so
-// they must be stable across releases.
 const (
-	CompressionAlgorithmSnappy CompressionAlgorithm = 1
-	CompressionAlgorithmZstd   CompressionAlgorithm = 2
-	CompressionAlgorithmNone   CompressionAlgorithm = 3
-	CompressionAlgorithmMinLZ  CompressionAlgorithm = 4
+	compressionAlgorithmSnappy compressionAlgorithm = 1
+	compressionAlgorithmZstd   compressionAlgorithm = 2
+	compressionAlgorithmNone   compressionAlgorithm = 3
 )
 
-var compressionAlgorithmToString = map[CompressionAlgorithm]string{
-	CompressionAlgorithmSnappy: "snappy",
-	CompressionAlgorithmMinLZ:  "minlz",
-	CompressionAlgorithmNone:   "none",
-	CompressionAlgorithmZstd:   "zstd",
-}
-
 // String implements fmt.Stringer for CompressionAlgorithm.
-func (c CompressionAlgorithm) String() string {
-	str := compressionAlgorithmToString[c]
-	if str == "" {
-		panic(errors.Errorf("invalid compression type: %d", c))
+func (c compressionAlgorithm) String() string {
+	switch c {
+	case compressionAlgorithmSnappy:
+		return "snappy"
+	case compressionAlgorithmZstd:
+		return "zstd"
+	case compressionAlgorithmNone:
+		return "none"
+	default:
+		panic(errors.Errorf("unknown compression type: %d", c))
 	}
-	return str
 }
 
 // RegisterCompressionAlgorithmClusterSetting is a helper to register an enum
 // cluster setting with the given name, description and default value.
 func RegisterCompressionAlgorithmClusterSetting(
-	name settings.InternalKey, desc string, defaultValue CompressionAlgorithm,
-) *settings.EnumSetting[CompressionAlgorithm] {
+	name settings.InternalKey, desc string, defaultValue compressionAlgorithm,
+) *settings.EnumSetting[compressionAlgorithm] {
 	return settings.RegisterEnumSetting(
 		// NB: We can't use settings.SystemOnly today because we may need to read the
 		// value from within a tenant building an sstable for AddSSTable.
@@ -219,7 +214,11 @@ func RegisterCompressionAlgorithmClusterSetting(
 		// will need to override it because they depend on a deterministic sstable
 		// size.
 		defaultValue.String(),
-		compressionAlgorithmToString,
+		map[compressionAlgorithm]string{
+			compressionAlgorithmSnappy: compressionAlgorithmSnappy.String(),
+			compressionAlgorithmZstd:   compressionAlgorithmZstd.String(),
+			compressionAlgorithmNone:   compressionAlgorithmNone.String(),
+		},
 		settings.WithPublic,
 	)
 }
@@ -232,7 +231,7 @@ func RegisterCompressionAlgorithmClusterSetting(
 var CompressionAlgorithmStorage = RegisterCompressionAlgorithmClusterSetting(
 	"storage.sstable.compression_algorithm",
 	`determines the compression algorithm to use when compressing sstable data blocks for use in a Pebble store;`,
-	CompressionAlgorithmMinLZ, // Default.
+	compressionAlgorithmSnappy, // Default.
 )
 
 // CompressionAlgorithmBackupStorage determines the compression algorithm used
@@ -242,7 +241,7 @@ var CompressionAlgorithmStorage = RegisterCompressionAlgorithmClusterSetting(
 var CompressionAlgorithmBackupStorage = RegisterCompressionAlgorithmClusterSetting(
 	"storage.sstable.compression_algorithm_backup_storage",
 	`determines the compression algorithm to use when compressing sstable data blocks for backup row data storage;`,
-	CompressionAlgorithmMinLZ, // Default.
+	compressionAlgorithmSnappy, // Default.
 )
 
 // CompressionAlgorithmBackupTransport determines the compression algorithm used
@@ -255,23 +254,21 @@ var CompressionAlgorithmBackupStorage = RegisterCompressionAlgorithmClusterSetti
 var CompressionAlgorithmBackupTransport = RegisterCompressionAlgorithmClusterSetting(
 	"storage.sstable.compression_algorithm_backup_transport",
 	`determines the compression algorithm to use when compressing sstable data blocks for backup transport;`,
-	CompressionAlgorithmMinLZ, // Default.
+	compressionAlgorithmSnappy, // Default.
 )
 
 func getCompressionAlgorithm(
 	ctx context.Context,
 	settings *cluster.Settings,
-	setting *settings.EnumSetting[CompressionAlgorithm],
+	setting *settings.EnumSetting[compressionAlgorithm],
 ) pebble.Compression {
 	switch setting.Get(&settings.SV) {
-	case CompressionAlgorithmSnappy:
+	case compressionAlgorithmSnappy:
 		return pebble.SnappyCompression
-	case CompressionAlgorithmZstd:
+	case compressionAlgorithmZstd:
 		return pebble.ZstdCompression
-	case CompressionAlgorithmNone:
+	case compressionAlgorithmNone:
 		return pebble.NoCompression
-	case CompressionAlgorithmMinLZ:
-		return pebble.MinLZCompression
 	default:
 		return pebble.DefaultCompression
 	}
@@ -431,17 +428,10 @@ func DefaultPebbleOptions() *pebble.Options {
 	// once.
 	opts.TargetByteDeletionRate = 128 << 20 // 128 MB
 	opts.Experimental.ShortAttributeExtractor = shortAttributeExtractorForValues
-	opts.Experimental.SpanPolicyFunc = pebble.MakeStaticSpanPolicyFunc(
-		cockroachkvs.Compare,
-		pebble.KeyRange{
-			Start: EncodeMVCCKey(MVCCKey{Key: keys.LocalRangeLockTablePrefix}),
-			End:   EncodeMVCCKey(MVCCKey{Key: keys.LocalRangeLockTablePrefix.PrefixEnd()}),
-		},
-		pebble.SpanPolicy{
-			DisableValueSeparationBySuffix: true,
-			ValueStoragePolicy:             pebble.ValueStorageLowReadLatency,
-		},
-	)
+	opts.Experimental.RequiredInPlaceValueBound = pebble.UserKeyPrefixBound{
+		Lower: EncodeMVCCKey(MVCCKey{Key: keys.LocalRangeLockTablePrefix}),
+		Upper: EncodeMVCCKey(MVCCKey{Key: keys.LocalRangeLockTablePrefix.PrefixEnd()}),
+	}
 	// Disable multi-level compaction heuristic for now. See #134423
 	// for why this was disabled, and what needs to be changed to reenable it.
 	// This issue tracks re-enablement: https://github.com/cockroachdb/pebble/issues/4139
@@ -1805,8 +1795,8 @@ func (p *Pebble) GetEnvStats() (*fs.EnvStats, error) {
 	stats.TotalFiles += uint64(m.WAL.Files + m.Table.ZombieCount + m.WAL.ObsoleteFiles + m.Table.ObsoleteCount)
 	stats.TotalBytes = m.WAL.Size + m.Table.ZombieSize + m.Table.ObsoleteSize
 	for _, l := range m.Levels {
-		stats.TotalFiles += uint64(l.TablesCount)
-		stats.TotalBytes += uint64(l.TablesSize)
+		stats.TotalFiles += uint64(l.NumFiles)
+		stats.TotalBytes += uint64(l.Size)
 	}
 
 	sstSizes := make(map[pebble.FileNum]uint64)
@@ -1956,6 +1946,7 @@ func (p *Pebble) IngestAndExciseFiles(
 	shared []pebble.SharedSSTMeta,
 	external []pebble.ExternalFile,
 	exciseSpan roachpb.Span,
+	sstsContainExciseTombstone bool,
 ) (pebble.IngestOperationStats, error) {
 	rawSpan := pebble.KeyRange{
 		Start: EngineKey{Key: exciseSpan.Key}.Encode(),
@@ -2060,12 +2051,12 @@ func (p *Pebble) ApproximateDiskBytes(
 }
 
 // Compact implements the Engine interface.
-func (p *Pebble) Compact(ctx context.Context) error {
-	return p.db.Compact(ctx, nil /* start */, EncodeMVCCKey(MVCCKeyMax), true /* parallel */)
+func (p *Pebble) Compact() error {
+	return p.db.Compact(nil, EncodeMVCCKey(MVCCKeyMax), true /* parallel */)
 }
 
 // CompactRange implements the Engine interface.
-func (p *Pebble) CompactRange(ctx context.Context, start, end roachpb.Key) error {
+func (p *Pebble) CompactRange(start, end roachpb.Key) error {
 	// TODO(jackson): Consider changing Engine.CompactRange's signature to take
 	// in EngineKeys so that it's unambiguous that the arguments have already
 	// been encoded as engine keys. We do need to encode these keys in protocol
@@ -2079,7 +2070,7 @@ func (p *Pebble) CompactRange(ctx context.Context, start, end roachpb.Key) error
 	if ek, ok := DecodeEngineKey(end); !ok || ek.Validate() != nil {
 		return errors.Errorf("invalid end key: %q", end)
 	}
-	return p.db.Compact(ctx, start, end, true /* parallel */)
+	return p.db.Compact(start, end, true /* parallel */)
 }
 
 // RegisterFlushCompletedCallback implements the Engine interface.
@@ -2123,8 +2114,8 @@ func (p *Pebble) CreateCheckpoint(dir string, spans []roachpb.Span) error {
 
 	// TODO(#90543, cockroachdb/pebble#2285): move spans info to Pebble manifest.
 	if len(spans) > 0 {
-		if err := safeWriteToUnencryptedFile(
-			p.cfg.env.UnencryptedFS, dir, p.cfg.env.PathJoin(dir, "checkpoint.txt"),
+		if err := fs.SafeWriteToFile(
+			p.cfg.env, dir, p.cfg.env.PathJoin(dir, "checkpoint.txt"),
 			checkpointSpansNote(spans),
 			fs.UnspecifiedWriteCategory,
 		); err != nil {

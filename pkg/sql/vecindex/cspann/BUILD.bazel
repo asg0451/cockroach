@@ -3,8 +3,8 @@ load("@io_bazel_rules_go//proto:def.bzl", "go_proto_library")
 load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
 
 filegroup(
-    name = "datasets",
-    srcs = glob(["testdata/*.gob"]),
+    name = "features_10000",
+    srcs = glob(["testdata/features_10000.gob"]),
     visibility = ["//visibility:public"],
 )
 
@@ -22,7 +22,6 @@ go_library(
         "pacer.go",
         "partition.go",
         "partition_metadata.go",
-        "rot.go",
         "search_set.go",
         "searcher.go",
         "store.go",
@@ -34,7 +33,6 @@ go_library(
     deps = [
         "//pkg/sql/vecindex/cspann/quantize",
         "//pkg/sql/vecindex/cspann/utils",
-        "//pkg/sql/vecindex/cspann/vecdist",
         "//pkg/sql/vecindex/cspann/workspace",
         "//pkg/util/buildutil",
         "//pkg/util/container/heap",
@@ -63,7 +61,6 @@ go_test(
         "pacer_test.go",
         "partition_metadata_test.go",
         "partition_test.go",
-        "rot_test.go",
         "search_set_test.go",
     ],
     data = glob(["testdata/**"]),
@@ -74,7 +71,6 @@ go_test(
         "//pkg/sql/vecindex/cspann/quantize",
         "//pkg/sql/vecindex/cspann/testutils",
         "//pkg/sql/vecindex/cspann/utils",
-        "//pkg/sql/vecindex/cspann/vecdist",
         "//pkg/sql/vecindex/cspann/workspace",
         "//pkg/util/leaktest",
         "//pkg/util/log",

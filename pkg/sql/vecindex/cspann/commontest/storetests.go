@@ -11,7 +11,6 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/sql/vecindex/cspann"
 	"github.com/cockroachdb/cockroach/pkg/sql/vecindex/cspann/quantize"
-	"github.com/cockroachdb/cockroach/pkg/sql/vecindex/cspann/vecdist"
 	"github.com/cockroachdb/cockroach/pkg/util/vector"
 	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/suite"
@@ -90,8 +89,8 @@ func NewStoreTestSuite(ctx context.Context, makeStore MakeStoreFunc) *StoreTestS
 	return &StoreTestSuite{
 		ctx:           ctx,
 		makeStore:     makeStore,
-		rootQuantizer: quantize.NewUnQuantizer(2, vecdist.L2Squared),
-		quantizer:     quantize.NewRaBitQuantizer(2, 42, vecdist.L2Squared)}
+		rootQuantizer: quantize.NewUnQuantizer(2),
+		quantizer:     quantize.NewRaBitQuantizer(2, 42)}
 }
 
 func (suite *StoreTestSuite) TestRunTransaction() {
@@ -408,10 +407,10 @@ func (suite *StoreTestSuite) TestSearchPartitions() {
 
 			// Validate search results.
 			result1 := cspann.SearchResult{
-				QueryDistance: 4.2, ErrorBound: 50.99,
+				QuerySquaredDistance: 4.2, ErrorBound: 50.99, CentroidDistance: 7.21,
 				ParentPartitionKey: testPartitionKey2, ChildKey: partitionKey4, ValueBytes: valueBytes4}
 			result2 := cspann.SearchResult{
-				QueryDistance: 8, ErrorBound: 0,
+				QuerySquaredDistance: 8, ErrorBound: 0, CentroidDistance: 0,
 				ParentPartitionKey: testPartitionKey, ChildKey: partitionKey3, ValueBytes: valueBytes3}
 			suite.Equal(cspann.SearchResults{result1, result2}, RoundResults(searchSet.PopResults(), 2))
 

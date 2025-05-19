@@ -21,7 +21,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/vecindex/cspann"
 	"github.com/cockroachdb/cockroach/pkg/sql/vecindex/cspann/quantize"
-	"github.com/cockroachdb/cockroach/pkg/sql/vecindex/cspann/vecdist"
 	"github.com/cockroachdb/cockroach/pkg/sql/vecindex/vecencoding"
 	"github.com/cockroachdb/cockroach/pkg/sql/vecindex/vecstore"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
@@ -65,7 +64,7 @@ func TestSearcher(t *testing.T) {
 		EncodingType:        catenumpb.SecondaryIndexEncoding,
 	}
 
-	quantizer := quantize.NewUnQuantizer(2, vecdist.L2Squared)
+	quantizer := quantize.NewUnQuantizer(2)
 	store, err := vecstore.NewWithColumnID(
 		ctx,
 		internalDB,
@@ -78,7 +77,6 @@ func TestSearcher(t *testing.T) {
 	require.NoError(t, err)
 
 	options := cspann.IndexOptions{
-		RotAlgorithm:     cspann.RotGivens,
 		MinPartitionSize: 2,
 		MaxPartitionSize: 4,
 		BaseBeamSize:     1,
@@ -151,17 +149,17 @@ func TestSearcher(t *testing.T) {
 	prefix = encoding.EncodeVarintAscending(prefix, 100)
 	require.NoError(t, searcher.Search(ctx, prefix, original))
 	res := searcher.NextResult()
-	require.InDelta(t, float32(1), res.QueryDistance, 0.01)
+	require.InDelta(t, float32(1), res.QuerySquaredDistance, 0.01)
 	res = searcher.NextResult()
-	require.InDelta(t, float32(20), res.QueryDistance, 0.01)
+	require.InDelta(t, float32(20), res.QuerySquaredDistance, 0.01)
 	require.Nil(t, searcher.NextResult())
 
 	// Search again to ensure search state is reset.
 	require.NoError(t, searcher.Search(ctx, prefix, original))
 	res = searcher.NextResult()
-	require.InDelta(t, float32(1), res.QueryDistance, 0.01)
+	require.InDelta(t, float32(1), res.QuerySquaredDistance, 0.01)
 	res = searcher.NextResult()
-	require.InDelta(t, float32(20), res.QueryDistance, 0.01)
+	require.InDelta(t, float32(20), res.QuerySquaredDistance, 0.01)
 	require.Nil(t, searcher.NextResult())
 
 	// Search for a vector to delete that doesn't exist (reuse memory).
