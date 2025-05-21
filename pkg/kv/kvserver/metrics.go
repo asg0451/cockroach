@@ -8,13 +8,11 @@ package kvserver
 import (
 	"context"
 	"fmt"
-	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/kv/kvbase"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/batcheval/result"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/closedts/ctpb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverpb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/rangefeed"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/split"
@@ -1030,20 +1028,6 @@ bytes preserved during flushes and compactions over the lifetime of the process.
 		Measurement: "Bytes",
 		Unit:        metric.Unit_BYTES,
 	}
-	metaSSTableRemoteBytes = metric.Metadata{
-		Name: "storage.sstable.remote.bytes",
-		Help: "Bytes in SSTables that are stored off-disk (remotely) " +
-			"in object storage.",
-		Measurement: "Bytes",
-		Unit:        metric.Unit_BYTES,
-	}
-	metaSSTableRemoteCount = metric.Metadata{
-		Name: "storage.sstable.remote.count",
-		Help: "Count of SSTables that are stored off-disk (remotely) " +
-			"in object storage.",
-		Measurement: "SSTables",
-		Unit:        metric.Unit_COUNT,
-	}
 	metaSSTableCompressionSnappy = metric.Metadata{
 		Name: "storage.sstable.compression.snappy.count",
 		Help: "Count of SSTables that have been compressed with the snappy " +
@@ -1212,36 +1196,37 @@ var (
 		Unit:        metric.Unit_COUNT,
 	}
 	metaRangeSnapShotCrossRegionSentBytes = metric.Metadata{
-		Name: "range.snapshots.cross-region.sent-bytes",
-		Help: "Number of snapshot bytes sent cross region by this store when " +
-			"region tiers are configured",
+		Name:        "range.snapshots.cross-region.sent-bytes",
+		Help:        "Number of snapshot bytes sent cross region",
 		Measurement: "Bytes",
 		Unit:        metric.Unit_BYTES,
 	}
 	metaRangeSnapShotCrossRegionRcvdBytes = metric.Metadata{
-		Name: "range.snapshots.cross-region.rcvd-bytes",
-		Help: "Number of snapshot bytes received cross region by this store " +
-			"when region tiers are configured",
+		Name:        "range.snapshots.cross-region.rcvd-bytes",
+		Help:        "Number of snapshot bytes received cross region",
 		Measurement: "Bytes",
 		Unit:        metric.Unit_BYTES,
 	}
 	metaRangeSnapShotCrossZoneSentBytes = metric.Metadata{
 		Name: "range.snapshots.cross-zone.sent-bytes",
-		Help: `Number of snapshot bytes sent cross zone within the same region by
-		this store when zone tiers are configured. If region tiers are not set, it
-		is assumed to be within the same region. To ensure accurate monitoring of
-		cross-zone data transfer, region and zone tiers should be consistently
-		configured across all nodes.`,
+		Help: `Number of snapshot bytes sent cross zone within same region or if
+		region tiers are not configured. This count increases for each snapshot sent
+		between different zones within the same region. However, if the region tiers
+		are not configured, this count may also include snapshot data sent between
+		different regions. Ensuring consistent configuration of region and zone
+		tiers across nodes helps to accurately monitor the data transmitted.`,
 		Measurement: "Bytes",
 		Unit:        metric.Unit_BYTES,
 	}
 	metaRangeSnapShotCrossZoneRcvdBytes = metric.Metadata{
 		Name: "range.snapshots.cross-zone.rcvd-bytes",
-		Help: `Number of snapshot bytes received cross zone within the same region
-		by this store when zone tiers are configured. If region tiers are not set,
-		it is assumed to be within the same region. To ensure accurate monitoring of
-		cross-zone data transfer, region and zone tiers should be consistently
-		configured across all nodes.`,
+		Help: `Number of snapshot bytes received cross zone within same region or if
+		region tiers are not configured. This count increases for each snapshot
+		received between different zones within the same region. However, if the
+		region tiers are not configured, this count may also include snapshot data
+		received between different regions. Ensuring consistent configuration of
+		region and zone tiers across nodes helps to accurately monitor the data
+		transmitted.`,
 		Measurement: "Bytes",
 		Unit:        metric.Unit_BYTES,
 	}
@@ -1743,7 +1728,7 @@ handling consumes writes.
 	metaRaftRcvdCrossRegionBytes = metric.Metadata{
 		Name: "raft.rcvd.cross_region.bytes",
 		Help: `Number of bytes received by this store for cross region Raft messages
-		when region tiers are configured. Note that this does not include raft
+		(when region tiers are configured). Note that this does not include raft
 		snapshot received.`,
 		Measurement: "Bytes",
 		Unit:        metric.Unit_BYTES,
@@ -1751,11 +1736,11 @@ handling consumes writes.
 	metaRaftRcvdCrossZoneBytes = metric.Metadata{
 		Name: "raft.rcvd.cross_zone.bytes",
 		Help: `Number of bytes received by this store for cross zone, same region
-		Raft messages when zone tiers are configured. If region tiers are not set,
-		it is assumed to be within the same region. To ensure accurate monitoring of
-		cross-zone data transfer, region and zone tiers should be consistently
-		configured across all nodes. Note that this does not include raft snapshot
-		received.`,
+		Raft messages (when region and zone tiers are configured). If region tiers
+		are not configured, this count may include data sent between different
+		regions. To ensure accurate monitoring of transmitted data, it is important
+		to set up a consistent locality configuration across nodes. Note that this
+		does not include raft snapshot received.`,
 		Measurement: "Bytes",
 		Unit:        metric.Unit_BYTES,
 	}
@@ -1769,7 +1754,7 @@ handling consumes writes.
 	metaRaftSentCrossRegionBytes = metric.Metadata{
 		Name: "raft.sent.cross_region.bytes",
 		Help: `Number of bytes sent by this store for cross region Raft messages
-		when region	tiers are configured. Note that this does not include raft
+		(when region tiers are configured). Note that this does not include raft
 		snapshot sent.`,
 		Measurement: "Bytes",
 		Unit:        metric.Unit_BYTES,
@@ -1777,11 +1762,11 @@ handling consumes writes.
 	metaRaftSentCrossZoneBytes = metric.Metadata{
 		Name: "raft.sent.cross_zone.bytes",
 		Help: `Number of bytes sent by this store for cross zone, same region Raft
-		messages when zone tiers are configured. If region tiers are not set, it is
-		assumed to be within the same region. To ensure accurate monitoring of
-		cross-zone data transfer, region and zone tiers should be consistently
-		configured across all nodes. Note that this does not include raft snapshot
-		sent.`,
+		messages (when region and zone tiers are configured). If region tiers are
+		not configured, this count may include data sent between different regions.
+		To ensure accurate monitoring of transmitted data, it is important to set up
+		a consistent locality configuration across nodes. Note that this does not
+		include raft snapshot sent.`,
 		Measurement: "Bytes",
 		Unit:        metric.Unit_BYTES,
 	}
@@ -2434,22 +2419,6 @@ throttled they do count towards 'delay.total' and 'delay.enginebackpressure'.
 		Unit:        metric.Unit_NANOSECONDS,
 	}
 
-	// Closed timestamp policy change metrics.
-	metaClosedTimestampPolicyChange = metric.Metadata{
-		Name:        "kv.closed_timestamp.policy_change",
-		Help:        "Number of times closed timestamp policy change occurred on ranges",
-		Measurement: "Events",
-		Unit:        metric.Unit_COUNT,
-	}
-
-	metaClosedTimestampLatencyInfoMissing = metric.Metadata{
-		Name: "kv.closed_timestamp.policy_latency_info_missing",
-		Help: "Number of times closed timestamp policy refresh had to use hardcoded network RTT " +
-			"due to missing node latency info for one or more replicas",
-		Measurement: "Events",
-		Unit:        metric.Unit_COUNT,
-	}
-
 	// Replica circuit breaker.
 	metaReplicaCircuitBreakerCurTripped = metric.Metadata{
 		Name: "kv.replica_circuit_breaker.num_tripped_replicas",
@@ -2498,13 +2467,6 @@ Note that the measurement does not include the duration for replicating the eval
 	metaNoSplitKeyCount = metric.Metadata{
 		Name:        "kv.loadsplitter.nosplitkey",
 		Help:        "Load-based splitter could not find a split key.",
-		Measurement: "Occurrences",
-		Unit:        metric.Unit_COUNT,
-	}
-
-	metaClearDirectionCount = metric.Metadata{
-		Name:        "kv.loadsplitter.cleardirection",
-		Help:        "Load-based splitter observed an access direction greater than 80% left or right in the samples.",
 		Measurement: "Occurrences",
 		Unit:        metric.Unit_COUNT,
 	}
@@ -2682,12 +2644,11 @@ type StoreMetrics struct {
 	RaftFlowStateCounts           [tracker.StateCount]*metric.Gauge
 
 	// Range metrics.
-	RangeCount                      *metric.Gauge
-	UnavailableRangeCount           *metric.Gauge
-	UnderReplicatedRangeCount       *metric.Gauge
-	OverReplicatedRangeCount        *metric.Gauge
-	DecommissioningRangeCount       *metric.Gauge
-	RangeClosedTimestampPolicyCount [ctpb.MAX_CLOSED_TIMESTAMP_POLICY]*metric.Gauge
+	RangeCount                *metric.Gauge
+	UnavailableRangeCount     *metric.Gauge
+	UnderReplicatedRangeCount *metric.Gauge
+	OverReplicatedRangeCount  *metric.Gauge
+	DecommissioningRangeCount *metric.Gauge
 
 	// Lease request metrics for successful and failed lease requests. These
 	// count proposals (i.e. it does not matter how many replicas apply the
@@ -2814,8 +2775,6 @@ type StoreMetrics struct {
 	BatchCommitWALRotWaitDuration     *metric.Counter
 	BatchCommitCommitWaitDuration     *metric.Counter
 	SSTableZombieBytes                *metric.Gauge
-	SSTableRemoteBytes                *metric.Gauge
-	SSTableRemoteCount                *metric.Gauge
 	SSTableCompressionSnappy          *metric.Gauge
 	SSTableCompressionZstd            *metric.Gauge
 	SSTableCompressionUnknown         *metric.Gauge
@@ -3051,10 +3010,6 @@ type StoreMetrics struct {
 
 	// Closed timestamp metrics.
 	ClosedTimestampMaxBehindNanos *metric.Gauge
-
-	// Closed timestamp policy change on ranges metrics.
-	ClosedTimestampPolicyChange       *metric.Counter
-	ClosedTimestampLatencyInfoMissing *metric.Counter
 
 	// Replica circuit breaker.
 	ReplicaCircuitBreakerCurTripped *metric.Gauge
@@ -3378,9 +3333,8 @@ func newStoreMetrics(histogramWindow time.Duration) *StoreMetrics {
 		registry:              storeRegistry,
 		TenantsStorageMetrics: newTenantsStorageMetrics(),
 		LoadSplitterMetrics: &split.LoadSplitterMetrics{
-			PopularKeyCount:     metric.NewCounter(metaPopularKeyCount),
-			NoSplitKeyCount:     metric.NewCounter(metaNoSplitKeyCount),
-			ClearDirectionCount: metric.NewCounter(metaClearDirectionCount),
+			PopularKeyCount: metric.NewCounter(metaPopularKeyCount),
+			NoSplitKeyCount: metric.NewCounter(metaNoSplitKeyCount),
 		},
 
 		// Replica metrics.
@@ -3397,12 +3351,11 @@ func newStoreMetrics(histogramWindow time.Duration) *StoreMetrics {
 		RaftFlowStateCounts:           raftFlowStateGaugeSlice(),
 
 		// Range metrics.
-		RangeCount:                      metric.NewGauge(metaRangeCount),
-		UnavailableRangeCount:           metric.NewGauge(metaUnavailableRangeCount),
-		UnderReplicatedRangeCount:       metric.NewGauge(metaUnderReplicatedRangeCount),
-		OverReplicatedRangeCount:        metric.NewGauge(metaOverReplicatedRangeCount),
-		DecommissioningRangeCount:       metric.NewGauge(metaDecommissioningRangeCount),
-		RangeClosedTimestampPolicyCount: makePolicyRefresherMetrics(),
+		RangeCount:                metric.NewGauge(metaRangeCount),
+		UnavailableRangeCount:     metric.NewGauge(metaUnavailableRangeCount),
+		UnderReplicatedRangeCount: metric.NewGauge(metaUnderReplicatedRangeCount),
+		OverReplicatedRangeCount:  metric.NewGauge(metaOverReplicatedRangeCount),
+		DecommissioningRangeCount: metric.NewGauge(metaDecommissioningRangeCount),
 
 		// Lease request metrics.
 		LeaseRequestSuccessCount: metric.NewCounter(metaLeaseRequestSuccessCount),
@@ -3546,8 +3499,6 @@ func newStoreMetrics(histogramWindow time.Duration) *StoreMetrics {
 		BatchCommitWALRotWaitDuration:     metric.NewCounter(metaBatchCommitWALRotDuration),
 		BatchCommitCommitWaitDuration:     metric.NewCounter(metaBatchCommitCommitWaitDuration),
 		SSTableZombieBytes:                metric.NewGauge(metaSSTableZombieBytes),
-		SSTableRemoteBytes:                metric.NewGauge(metaSSTableRemoteBytes),
-		SSTableRemoteCount:                metric.NewGauge(metaSSTableRemoteCount),
 		SSTableCompressionSnappy:          metric.NewGauge(metaSSTableCompressionSnappy),
 		SSTableCompressionZstd:            metric.NewGauge(metaSSTableCompressionZstd),
 		SSTableCompressionUnknown:         metric.NewGauge(metaSSTableCompressionUnknown),
@@ -3873,9 +3824,6 @@ func newStoreMetrics(histogramWindow time.Duration) *StoreMetrics {
 		// Estimated MVCC stats in split.
 		SplitsWithEstimatedStats:     metric.NewCounter(metaSplitEstimatedStats),
 		SplitEstimatedTotalBytesDiff: metric.NewCounter(metaSplitEstimatedTotalBytesDiff),
-
-		ClosedTimestampPolicyChange:       metric.NewCounter(metaClosedTimestampPolicyChange),
-		ClosedTimestampLatencyInfoMissing: metric.NewCounter(metaClosedTimestampLatencyInfoMissing),
 	}
 	sm.categoryIterMetrics.init(storeRegistry)
 
@@ -3987,7 +3935,7 @@ func (sm *StoreMetrics) updateEngineMetrics(m storage.Metrics) {
 	sm.SecondaryCacheEvictions.Update(m.SecondaryCacheMetrics.Evictions)
 	sm.SecondaryCacheWriteBackFails.Update(m.SecondaryCacheMetrics.WriteBackFailures)
 	sm.RdbL0Sublevels.Update(int64(m.Levels[0].Sublevels))
-	sm.RdbL0NumFiles.Update(m.Levels[0].TablesCount)
+	sm.RdbL0NumFiles.Update(m.Levels[0].NumFiles)
 	sm.RdbL0BytesFlushed.Update(int64(m.Levels[0].BytesFlushed))
 	sm.FlushableIngestCount.Update(int64(m.Flush.AsIngestCount))
 	sm.FlushableIngestTableCount.Update(int64(m.Flush.AsIngestTableCount))
@@ -4010,9 +3958,6 @@ func (sm *StoreMetrics) updateEngineMetrics(m storage.Metrics) {
 	sm.BatchCommitWALRotWaitDuration.Update(int64(m.BatchCommitStats.WALRotationDuration))
 	sm.BatchCommitCommitWaitDuration.Update(int64(m.BatchCommitStats.CommitWaitDuration))
 	sm.SSTableZombieBytes.Update(int64(m.Table.ZombieSize))
-	count, size := m.RemoteTablesTotal()
-	sm.SSTableRemoteBytes.Update(int64(size))
-	sm.SSTableRemoteCount.Update(int64(count))
 	sm.SSTableCompressionSnappy.Update(m.Table.CompressedCountSnappy)
 	sm.SSTableCompressionZstd.Update(m.Table.CompressedCountZstd)
 	sm.SSTableCompressionUnknown.Update(m.Table.CompressedCountUnknown)
@@ -4023,7 +3968,7 @@ func (sm *StoreMetrics) updateEngineMetrics(m storage.Metrics) {
 	totalWriteAmp := float64(0)
 	for level, stats := range m.Levels {
 		sm.RdbBytesIngested[level].Update(int64(stats.BytesIngested))
-		sm.RdbLevelSize[level].Update(stats.TablesSize)
+		sm.RdbLevelSize[level].Update(stats.Size)
 		sm.RdbLevelScore[level].Update(stats.Score)
 		totalWriteAmp += stats.WriteAmp()
 	}
@@ -4031,12 +3976,14 @@ func (sm *StoreMetrics) updateEngineMetrics(m storage.Metrics) {
 }
 
 // updateCrossLocalityMetricsOnSnapshotSent updates cross-locality related store
-// metrics when outgoing snapshots are sent to the outgoingSnapshotStream.
+// metrics when outgoing snapshots are sent to the outgoingSnapshotStream. The
+// metrics being updated include 1. cross-region metrics, which monitor
+// activities across different regions, and 2. cross-zone metrics, which monitor
+// activities across different zones within the same region or in cases where
+// region tiers are not configured.
 func (sm *StoreMetrics) updateCrossLocalityMetricsOnSnapshotSent(
 	comparisonResult roachpb.LocalityComparisonType, inc int64,
 ) {
-	// Read more about locality comparison in
-	// updateCrossLocalityMetricsOnIncomingRaftMsg.
 	switch comparisonResult {
 	case roachpb.LocalityComparisonType_CROSS_REGION:
 		sm.RangeSnapShotCrossRegionSentBytes.Inc(inc)
@@ -4047,12 +3994,13 @@ func (sm *StoreMetrics) updateCrossLocalityMetricsOnSnapshotSent(
 
 // updateCrossLocalityMetricsOnSnapshotRcvd updates cross-locality related store
 // metrics when receiving SnapshotRequests through streaming and constructing
-// incoming snapshots.
+// incoming snapshots. The metrics being updated include 1. cross-region
+// metrics, which monitor activities across different regions, and 2. cross-zone
+// metrics, which monitor activities across different zones within the same
+// region or in cases where region tiers are not configured.
 func (sm *StoreMetrics) updateCrossLocalityMetricsOnSnapshotRcvd(
 	comparisonResult roachpb.LocalityComparisonType, inc int64,
 ) {
-	// Read more about locality comparison in
-	// updateCrossLocalityMetricsOnIncomingRaftMsg.
 	switch comparisonResult {
 	case roachpb.LocalityComparisonType_CROSS_REGION:
 		sm.RangeSnapShotCrossRegionRcvdBytes.Inc(inc)
@@ -4061,44 +4009,39 @@ func (sm *StoreMetrics) updateCrossLocalityMetricsOnSnapshotRcvd(
 	}
 }
 
-// updateCrossLocalityMetricsOnIncomingRaftMsg updates StoreMetrics for Raft
-// messages received by the store. This includes messages that may have been
-// dropped and not successfully enqueued to the raftReceiveQueues (due to queue
-// length or size).
+// updateCrossLocalityMetricsOnIncomingRaftMsg updates store metrics for raft
+// messages that have been received via HandleRaftRequest. In the cases of
+// messages containing heartbeats or heartbeat_resps, they capture the byte
+// count of requests with coalesced heartbeats before any uncoalescing happens.
+// The metrics being updated include 1. total byte count of messages received 2.
+// cross-region metrics, which monitor activities across different regions, and
+// 3. cross-zone metrics, which monitor activities across different zones within
+// the same region or in cases where region tiers are not configured.
 func (sm *StoreMetrics) updateCrossLocalityMetricsOnIncomingRaftMsg(
 	comparisonResult roachpb.LocalityComparisonType, msgSize int64,
 ) {
-	// Update metrics for total byte count of messages received. In the cases of
-	// messages containing heartbeats or heartbeat_resps, they capture the byte
-	// count of requests with coalesced heartbeats before any uncoalescing
-	// happens.
 	sm.RaftRcvdBytes.Inc(msgSize)
-	// In cases where both region and zone tiers are not configured,
-	// comparisonResult will be UNDEFINED.
 	switch comparisonResult {
 	case roachpb.LocalityComparisonType_CROSS_REGION:
-		// Update cross-region metrics: monitor activities across different regions.
 		sm.RaftRcvdCrossRegionBytes.Inc(msgSize)
 	case roachpb.LocalityComparisonType_SAME_REGION_CROSS_ZONE:
-		// Update cross-zone metrics: monitor activities across different zones
-		// within the same region. If region tiers are not set, it is assumed to be
-		// within the same region.
 		sm.RaftRcvdCrossZoneBytes.Inc(msgSize)
 	}
 }
 
 // updateCrossLocalityMetricsOnOutgoingRaftMsg updates store metrics for raft
-// messages that are about to be sent via raftSendQueue. These metrics may
-// include messages that get dropped by `SendAsync` due to a full outgoing
-// queue.
+// messages that are about to be sent via raftSendQueue. In the cases of
+// messages containing heartbeats or heartbeat_resps, they capture the byte
+// count of requests with coalesced heartbeats. The metrics being updated
+// include 1. total byte count of messages sent 2. cross-region metrics, which
+// monitor activities across different regions, and 3. cross-zone metrics, which
+// monitor activities across different zones within the same region or in cases
+// where region tiers are not configured. Note that these metrics may include
+// messages that get dropped by `SendAsync` due to a full outgoing queue.
 func (sm *StoreMetrics) updateCrossLocalityMetricsOnOutgoingRaftMsg(
 	comparisonResult roachpb.LocalityComparisonType, msgSize int64,
 ) {
-	// In the cases of messages containing heartbeats or heartbeat_resps, they
-	// capture the byte count of requests with coalesced heartbeats.
 	sm.RaftSentBytes.Inc(msgSize)
-	// Read more about locality comparison in
-	// updateCrossLocalityMetricsOnIncomingRaftMsg above.
 	switch comparisonResult {
 	case roachpb.LocalityComparisonType_CROSS_REGION:
 		sm.RaftSentCrossRegionBytes.Inc(msgSize)
@@ -4180,20 +4123,6 @@ func raftFlowStateGaugeSlice() [tracker.StateCount]*metric.Gauge {
 	gauges[tracker.StateReplicate] = metric.NewGauge(metaRaftFlowsReplicate)
 	gauges[tracker.StateSnapshot] = metric.NewGauge(metaRaftFlowsSnapshot)
 	return gauges
-}
-
-func makePolicyRefresherMetrics() [ctpb.MAX_CLOSED_TIMESTAMP_POLICY]*metric.Gauge {
-	var policyGauges [ctpb.MAX_CLOSED_TIMESTAMP_POLICY]*metric.Gauge
-	for policy := ctpb.LAG_BY_CLUSTER_SETTING; policy < ctpb.MAX_CLOSED_TIMESTAMP_POLICY; policy++ {
-		meta := metric.Metadata{
-			Name:        fmt.Sprintf("kv.closed_timestamp.policy.%s", strings.ToLower(policy.String())),
-			Help:        fmt.Sprintf("Number of ranges with %s closed timestamp policy", policy.String()),
-			Measurement: "Ranges",
-			Unit:        metric.Unit_COUNT,
-		}
-		policyGauges[policy] = metric.NewGauge(meta)
-	}
-	return policyGauges
 }
 
 func storageLevelMetricMetadata(

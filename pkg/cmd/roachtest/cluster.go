@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"math/rand"
 	"net"
@@ -1103,6 +1104,7 @@ func attachToExistingCluster(
 	if err := c.validate(clusterSpec, l); err != nil {
 		return nil, err
 	}
+	fmt.Printf("cloud: %s\n", c.cloud)
 	// Assert cloud was set.
 	if c.cloud == spec.AnyCloud {
 		return nil, errors.New("unable to validate cloud provider")
@@ -2164,9 +2166,6 @@ func (c *clusterImpl) StartE(
 	defer c.clearStatusForClusterOpt(startOpts.RoachtestOpts.Worker)
 
 	startOpts.RoachprodOpts.EncryptedStores = c.encAtRest
-	if c.t.Spec().(*registry.TestSpec).Benchmark {
-		startOpts.RoachprodOpts.ScheduleBackups = false
-	}
 
 	// Needed for backward-compat on crdb_internal.ranges{_no_leases}.
 	// Remove in v23.2.
@@ -2205,7 +2204,6 @@ func (c *clusterImpl) StartE(
 	// Do not refetch certs if that step already happened once (i.e., we
 	// are restarting a node).
 	if settings.Secure && c.localCertsDir == "" {
-		// Get the certs from the first node.
 		if err := c.RefetchCertsFromNode(ctx, 1); err != nil {
 			return err
 		}
@@ -2282,7 +2280,6 @@ func (c *clusterImpl) StartServiceForVirtualClusterE(
 	}
 
 	if settings.Secure {
-		// Get the certs from the first node.
 		if err := c.RefetchCertsFromNode(ctx, 1); err != nil {
 			return err
 		}
@@ -2340,7 +2337,20 @@ func (c *clusterImpl) RefetchCertsFromNode(ctx context.Context, node int) error 
 	// certs. Bypass that distinction (which should be fixed independently, but
 	// that might cause fallout) by using a non-existing dir here.
 	c.localCertsDir = filepath.Join(c.localCertsDir, install.CockroachNodeCertsDir)
-	return roachprod.FetchCertsDir(ctx, c.l, c.MakeNodes(c.Node(node)), fmt.Sprintf("./%s", install.CockroachNodeCertsDir), c.localCertsDir)
+	// Get the certs from the first node.
+	if err := c.Get(ctx, c.l, fmt.Sprintf("./%s", install.CockroachNodeCertsDir), c.localCertsDir, c.Node(node)); err != nil {
+		return errors.Wrap(err, "cluster.StartE")
+	}
+	// Need to prevent world readable files or lib/pq will complain.
+	return filepath.WalkDir(c.localCertsDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return errors.Wrap(err, "walking localCertsDir failed")
+		}
+		if d.IsDir() {
+			return nil
+		}
+		return os.Chmod(path, 0600)
+	})
 }
 
 func (c *clusterImpl) SetDefaultVirtualCluster(name string) {
@@ -3340,33 +3350,6 @@ func (c *clusterImpl) GetHostErrorVMs(ctx context.Context, l *logger.Logger) ([]
 		allHostErrorVMs = append(allHostErrorVMs, hostErrorVMS...)
 	}
 	return allHostErrorVMs, nil
-}
-
-func (c *clusterImpl) GetLiveMigrationVMs(l *logger.Logger) ([]string, error) {
-	if c.IsLocal() {
-		return nil, nil
-	}
-	cachedCluster, err := getCachedCluster(c.name)
-	if err != nil {
-		return nil, err
-	}
-
-	var liveMigrationVMs struct {
-		syncutil.Mutex
-		names []string
-	}
-	clusterErr := vm.FanOut(cachedCluster.VMs, func(p vm.Provider, vms vm.List) error {
-		names, err := p.GetLiveMigrationVMs(l, vms, cachedCluster.CreatedAt)
-		if err != nil {
-			return err
-		}
-		liveMigrationVMs.Lock()
-		defer liveMigrationVMs.Unlock()
-		liveMigrationVMs.names = append(liveMigrationVMs.names, names...)
-		return nil
-	})
-
-	return liveMigrationVMs.names, clusterErr
 }
 
 // RegisterClusterHook registers a hook to be run at a certain point as defined

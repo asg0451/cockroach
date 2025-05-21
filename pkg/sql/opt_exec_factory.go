@@ -183,12 +183,7 @@ func generateScanSpans(
 	if params.InvertedConstraint != nil {
 		return sb.SpansFromInvertedSpans(ctx, params.InvertedConstraint, params.IndexConstraint, nil /* scratch */)
 	}
-	var splitter span.Splitter
-	if params.Locking.MustLockAllRequestedColumnFamilies() {
-		splitter = span.MakeSplitterForSideEffect(tabDesc, index, params.NeededCols)
-	} else {
-		splitter = span.MakeSplitter(tabDesc, index, params.NeededCols)
-	}
+	splitter := span.MakeSplitter(tabDesc, index, params.NeededCols)
 	return sb.SpansFromConstraint(params.IndexConstraint, splitter)
 }
 

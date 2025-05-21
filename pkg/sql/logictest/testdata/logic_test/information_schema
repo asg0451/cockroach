@@ -3927,7 +3927,6 @@ copy_num_retries_per_batch                                 5
 copy_transaction_quality_of_service                        background
 copy_write_pipelining_enabled                              off
 cost_scans_with_default_col_size                           off
-create_table_with_schema_locked                            off
 database                                                   test
 datestyle                                                  ISO, MDY
 deadlock_timeout                                           0
@@ -4027,6 +4026,7 @@ optimizer_push_limit_into_project_filtered_scan            on
 optimizer_push_offset_into_index_join                      on
 optimizer_use_conditional_hoist_fix                        on
 optimizer_use_delete_range_fast_path                       on
+optimizer_use_exists_filter_hoist_rule                     off
 optimizer_use_forecasts                                    on
 optimizer_use_histograms                                   on
 optimizer_use_improved_computed_column_filters_derivation  on

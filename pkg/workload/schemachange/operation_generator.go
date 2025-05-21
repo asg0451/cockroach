@@ -1306,14 +1306,6 @@ func (og *operationGenerator) createTable(ctx context.Context, tx pgx.Tx) (*opSt
 		return false
 	}()
 
-	// Randomly create as schema locked table.
-	if og.params.rng.Intn(2) == 0 {
-		stmt.StorageParams = append(stmt.StorageParams, tree.StorageParam{
-			Key:   "schema_locked",
-			Value: tree.DBoolTrue,
-		})
-	}
-
 	tableExists, err := og.tableExists(ctx, tx, tableName)
 	if err != nil {
 		return nil, err
@@ -3829,14 +3821,6 @@ func (og *operationGenerator) randTypeName(
 func (og *operationGenerator) randTable(
 	ctx context.Context, tx pgx.Tx, pctExisting int, desiredSchema string,
 ) (*tree.TableName, error) {
-	// Because the declarative schema change can automatically set / unset
-	// schema_locked on tables, we will allow random table selection include
-	// schema_locked tables. When working with the legacy schema changer, we
-	// will intentionally only select non-schema locked tables.
-	excludeSchemaLocked := "  AND create_statement NOT LIKE '%schema_locked%' "
-	if og.useDeclarativeSchemaChanger {
-		excludeSchemaLocked = ""
-	}
 	if err := og.setSeedInDB(ctx, tx); err != nil {
 		return nil, err
 	}
@@ -3849,15 +3833,13 @@ func (og *operationGenerator) randTable(
 			return &treeTableName, nil
 		}
 		q := fmt.Sprintf(`
-		  SELECT descriptor_name 
-		    FROM crdb_internal.create_statements
-		   WHERE descriptor_name SIMILAR TO 'table_w[0-9]_+%%'
+		  SELECT table_name
+		    FROM [SHOW TABLES]
+		   WHERE table_name SIMILAR TO 'table_w[0-9]_+%%'
 				 AND schema_name = '%s'
-		     AND descriptor_type='table'
-		 	   %s 
 		ORDER BY random()
 		   LIMIT 1;
-		`, desiredSchema, excludeSchemaLocked)
+		`, desiredSchema)
 
 		var tableName string
 		if err := tx.QueryRow(ctx, q).Scan(&tableName); err != nil {
@@ -3888,17 +3870,13 @@ func (og *operationGenerator) randTable(
 		return &treeTableName, nil
 	}
 
-	q := fmt.Sprintf(`
-SELECT schema_name, descriptor_name 
-		    FROM crdb_internal.create_statements
-		   WHERE descriptor_name SIMILAR TO 'table_w[0-9]_+%%'
-		     AND descriptor_type='table'
-		 	   %s 
-		ORDER BY random()
-		   LIMIT 1;
-`,
-		excludeSchemaLocked)
-
+	const q = `
+  SELECT schema_name, table_name
+    FROM [SHOW TABLES]
+   WHERE table_name SIMILAR TO 'table_w[0-9]_+%'
+ORDER BY random()
+   LIMIT 1;
+`
 	var schemaName string
 	var tableName string
 	if err := tx.QueryRow(ctx, q).Scan(&schemaName, &tableName); err != nil {

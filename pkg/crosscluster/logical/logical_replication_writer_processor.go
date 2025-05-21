@@ -390,6 +390,7 @@ func (lrw *logicalReplicationWriterProcessor) Next() (
 			}
 		}
 	case <-lrw.aggTimer.C:
+		lrw.aggTimer.Read = true
 		lrw.aggTimer.Reset(15 * time.Second)
 		return nil, bulk.ConstructTracingAggregatorProducerMeta(lrw.Ctx(),
 			lrw.FlowCtx.NodeID.SQLInstanceID(), lrw.FlowCtx.ID, lrw.agg)
@@ -754,12 +755,7 @@ func getWriterType(
 ) (sqlclustersettings.LDRWriterType, error) {
 	switch mode {
 	case jobspb.LogicalReplicationDetails_Immediate:
-		// Require v25.2 to use the sql writer by default to ensure that the
-		// KV origin timestamp validation is available on all nodes.
-		if settings.Version.IsActive(ctx, clusterversion.V25_2) {
-			return sqlclustersettings.LDRWriterType(sqlclustersettings.LDRImmediateModeWriter.Get(&settings.SV)), nil
-		}
-		return sqlclustersettings.LDRWriterTypeSQL, nil
+		return sqlclustersettings.LDRWriterType(sqlclustersettings.LDRImmediateModeWriter.Get(&settings.SV)), nil
 	case jobspb.LogicalReplicationDetails_Validated:
 		return sqlclustersettings.LDRWriterTypeSQL, nil
 	default:

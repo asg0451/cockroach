@@ -502,7 +502,7 @@ func createChangefeedJobRecord(
 
 	if opts.HasEndTime() {
 		asOfClause := tree.AsOfClause{Expr: tree.NewStrVal(opts.GetEndTime())}
-		asOf, err := asof.Eval(ctx, asOfClause, p.SemaCtx(), &p.ExtendedEvalContext().Context)
+		asOf, err := asof.Eval(ctx, asOfClause, p.SemaCtx(), &p.ExtendedEvalContext().Context, asof.OptionAllowFutureTimestamp)
 		if err != nil {
 			return nil, err
 		}
@@ -1047,7 +1047,6 @@ func validateSink(
 			sinkTypeKafka:          {},
 			sinkTypeWebhook:        {},
 			sinkTypeSinklessBuffer: {},
-			sinkTypeCloudstorage:   {},
 		}
 		if _, ok := allowedSinkTypes[sinkTy]; !ok {
 			return errors.Newf("envelope=%s is incompatible with %s sink", changefeedbase.OptEnvelopeEnriched, sinkTy)

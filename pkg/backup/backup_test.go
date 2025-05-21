@@ -1556,6 +1556,7 @@ func TestRestoreReplanOnLag(t *testing.T) {
 				// procCompleteCh receives a ping.
 				timer.Reset(replanFreq * 2)
 				for range timer.C {
+					timer.Read = true
 					break
 				}
 			},

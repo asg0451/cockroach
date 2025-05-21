@@ -163,7 +163,7 @@ func getMaxWarehousesAboveEfficiency(
 	aggregatedMetrics = append(aggregatedMetrics, &roachtestutil.AggregatedMetric{
 		Name:           fmt.Sprintf("%s_max_warehouse", testName),
 		Value:          roachtestutil.MetricPoint(maxEfficientWarehouse),
-		Unit:           "warehouses",
+		Unit:           "",
 		IsHigherBetter: true,
 		// labels added here override any labels imported from the stats file.
 		// since we don't want to specify a warehouse label for this metric, we pass an empty label.
@@ -737,45 +737,6 @@ func registerTPCC(r registry.Registry) {
 		Randomized:        true,
 		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
 			runTPCCMixedHeadroom(ctx, t, c)
-		},
-	})
-
-	r.Add(registry.TestSpec{
-		Name:                      "tpcc-nowait/w=1000/nodes=5/cpu=16",
-		Owner:                     registry.OwnerTestEng,
-		Benchmark:                 true,
-		Cluster:                   r.MakeClusterSpec(6, spec.CPU(16), spec.WorkloadNode()),
-		CompatibleClouds:          registry.AllExceptAzure,
-		Suites:                    registry.Suites(registry.Nightly),
-		TestSelectionOptOutSuites: registry.Suites(registry.Nightly),
-		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
-			runTPCC(ctx, t, t.L(), c, tpccOptions{
-				Warehouses:                    1000,
-				Duration:                      10 * time.Minute,
-				ExtraRunArgs:                  "--wait=false --tolerate-errors --workers=200",
-				SetupType:                     usingImport,
-				DisableDefaultScheduledBackup: true,
-			})
-		},
-	})
-
-	r.Add(registry.TestSpec{
-		Name:                      "tpcc-nowait/literal/w=1000/nodes=5/cpu=16",
-		Owner:                     registry.OwnerTestEng,
-		Benchmark:                 true,
-		Cluster:                   r.MakeClusterSpec(6, spec.CPU(16), spec.WorkloadNode()),
-		CompatibleClouds:          registry.AllExceptAzure,
-		Suites:                    registry.Suites(registry.Nightly),
-		TestSelectionOptOutSuites: registry.Suites(registry.Nightly),
-		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
-			runTPCC(ctx, t, t.L(), c, tpccOptions{
-				Warehouses:                    1000,
-				Duration:                      10 * time.Minute,
-				ExtraRunArgs:                  "--wait=false --tolerate-errors --workers=200 --literal-implementation",
-				SetupType:                     usingImport,
-				ExpensiveChecks:               true, // Run expensive checks here to catch any issues with the literal implementation
-				DisableDefaultScheduledBackup: true,
-			})
 		},
 	})
 

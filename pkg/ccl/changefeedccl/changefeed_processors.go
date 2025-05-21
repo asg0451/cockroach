@@ -694,6 +694,7 @@ var aggregatorHeartbeatFrequency = settings.RegisterDurationSetting(
 	"changefeed aggregator will emit a heartbeat message to the coordinator with this frequency; 0 disables. "+
 		"The setting value should be <=1/2 of server.shutdown.jobs.timeout period",
 	4*time.Second,
+	settings.NonNegativeDuration,
 )
 
 var aggregatorFlushJitter = settings.RegisterFloatSetting(
@@ -710,11 +711,10 @@ func nextFlushWithJitter(s timeutil.TimeSource, d time.Duration, j float64) (tim
 	if j < 0 || d < 0 {
 		return s.Now(), errors.AssertionFailedf("invalid jitter value: %f, duration: %s", j, d)
 	}
-	maxJitter := int64(j * float64(d))
-	if maxJitter == 0 {
+	if j == 0 || d == 0 {
 		return s.Now().Add(d), nil
 	}
-	nextFlush := d + time.Duration(rand.Int63n(maxJitter))
+	nextFlush := d + time.Duration(rand.Int63n(int64(j*float64(d))))
 	return s.Now().Add(nextFlush), nil
 }
 
@@ -1469,6 +1469,7 @@ func (cf *changeFrontier) runUsageMetricReporting(ctx context.Context) {
 		t.Reset(reportingInterval - lastDuration)
 		select {
 		case start = <-t.Ch():
+			t.MarkRead()
 		case <-ctx.Done():
 			return
 		}

@@ -1420,7 +1420,8 @@ func NewTableDesc(
 	desc := tabledesc.InitTableDescriptor(
 		id, dbID, sc.GetID(), n.Table.Table(), creationTime, privileges, persistence,
 	)
-	setter := tablestorageparam.NewSetter(&desc, true /* isNewObject */)
+
+	setter := tablestorageparam.NewSetter(&desc)
 	if err := storageparam.Set(
 		ctx,
 		semaCtx,
@@ -2574,17 +2575,6 @@ func newTableDesc(
 		}
 		ttl.ScheduleID = j.ScheduleID()
 	}
-
-	// For tables set schema_locked by default if it hasn't been set, and we
-	// aren't running under an internal executor.
-	if !ret.IsView() && !ret.IsSequence() &&
-		n.StorageParams.GetVal("schema_locked") == nil &&
-		!params.p.SessionData().Internal &&
-		params.p.SessionData().CreateTableWithSchemaLocked &&
-		params.p.IsActive(params.ctx, clusterversion.V25_2) {
-		ret.SchemaLocked = true
-	}
-
 	return ret, nil
 }
 

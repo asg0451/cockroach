@@ -61,8 +61,6 @@ type deleteRun struct {
 	// of the target table being returned, that must be passed through from the
 	// input node.
 	numPassthrough int
-
-	mustValidateOldPKValues bool
 }
 
 func (r *deleteRun) initRowContainer(params runParams, columns colinfo.ResultColumns) {
@@ -189,7 +187,7 @@ func (r *deleteRun) processSourceRow(params runParams, sourceVals tree.Datums) e
 
 	// Queue the deletion in the KV batch.
 	if err := r.td.row(
-		params.ctx, deleteVals, pm, vh, r.mustValidateOldPKValues, r.traceKV,
+		params.ctx, deleteVals, pm, vh, false /* mustValidateOldPKValues */, r.traceKV,
 	); err != nil {
 		return err
 	}

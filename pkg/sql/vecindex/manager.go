@@ -227,8 +227,7 @@ func (m *Manager) getIndexOptions(config vecpb.Config, readOnly bool) *cspann.In
 		StalledOpTimeout: func() time.Duration {
 			return StalledOpTimeoutSetting.Get(m.sv)
 		},
-		IsDeterministic: config.IsDeterministic,
-		ReadOnly:        readOnly,
+		ReadOnly: readOnly,
 	}
 }
 

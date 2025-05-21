@@ -1043,6 +1043,7 @@ type Engine interface {
 		shared []pebble.SharedSSTMeta,
 		external []pebble.ExternalFile,
 		exciseSpan roachpb.Span,
+		sstsContainExciseTombstone bool,
 	) (pebble.IngestOperationStats, error)
 	// IngestExternalFiles is a variant of IngestLocalFiles that takes external
 	// files. These files can be referred to by multiple stores, but are not
@@ -1329,7 +1330,7 @@ type MetricsForInterval struct {
 func (m *Metrics) NumSSTables() int64 {
 	var num int64
 	for _, lm := range m.Metrics.Levels {
-		num += lm.TablesCount
+		num += lm.NumFiles
 	}
 	return num
 }
@@ -1393,13 +1394,13 @@ func (m *Metrics) AsStoreStatsEvent() eventpb.StoreStats {
 		RangeKeySetsCount:          m.Keys.RangeKeySetsCount,
 	}
 	for i, l := range m.Levels {
-		if l.TablesCount == 0 {
+		if l.NumFiles == 0 {
 			continue
 		}
 		e.Levels = append(e.Levels, eventpb.LevelStats{
 			Level:           uint32(i),
-			NumFiles:        l.TablesCount,
-			SizeBytes:       l.TablesSize,
+			NumFiles:        l.NumFiles,
+			SizeBytes:       l.Size,
 			Score:           float32(l.Score),
 			BytesIn:         l.BytesIn,
 			BytesIngested:   l.BytesIngested,
@@ -1760,7 +1761,7 @@ func preIngestDelay(ctx context.Context, eng Engine, settings *cluster.Settings)
 		return
 	}
 	log.VEventf(ctx, 2, "delaying SST ingestion %s. %d L0 files, %d L0 Sublevels",
-		targetDelay, metrics.Levels[0].TablesCount, metrics.Levels[0].Sublevels)
+		targetDelay, metrics.Levels[0].NumFiles, metrics.Levels[0].Sublevels)
 
 	select {
 	case <-time.After(targetDelay):
@@ -1773,7 +1774,7 @@ func calculatePreIngestDelay(settings *cluster.Settings, metrics *pebble.Metrics
 	l0ReadAmpLimit := ingestDelayL0Threshold.Get(&settings.SV)
 
 	const ramp = 10
-	l0ReadAmp := metrics.Levels[0].TablesCount
+	l0ReadAmp := metrics.Levels[0].NumFiles
 	if metrics.Levels[0].Sublevels >= 0 {
 		l0ReadAmp = int64(metrics.Levels[0].Sublevels)
 	}

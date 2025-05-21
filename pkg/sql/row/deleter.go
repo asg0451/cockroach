@@ -200,7 +200,7 @@ func (rd *Deleter) DeleteRow(
 
 		if oth.IsSet() || mustValidateOldPKValues {
 			var expValue []byte
-			if !oth.IsSet() || !oth.PreviousWasDeleted {
+			if !oth.PreviousWasDeleted {
 				prevValue, err := rd.encodeValueForPrimaryIndexFamily(family, values)
 				if err != nil {
 					return err

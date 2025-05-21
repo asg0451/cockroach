@@ -100,10 +100,6 @@ func (s *Scanner) RetainComments() {
 	s.retainComments = true
 }
 
-func (s *Scanner) ResetComments() {
-	s.Comments = nil
-}
-
 // Cleanup is used to avoid holding on to memory unnecessarily (for the cases
 // where we reuse a Scanner).
 func (s *Scanner) Cleanup() {
@@ -600,13 +596,8 @@ func (s *Scanner) ScanComment(lval ScanSymType) (present, ok bool) {
 			return false, true
 		}
 		for {
-			next := s.next()
-			switch next {
-			case eof:
-				return true, true
-			case '\n':
-				// Don't include the new-line character in in-line comments.
-				s.pos--
+			switch s.next() {
+			case eof, '\n':
 				return true, true
 			}
 		}

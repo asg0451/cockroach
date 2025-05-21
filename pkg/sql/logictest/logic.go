@@ -1334,6 +1334,8 @@ func (t *logicTest) newTestServerCluster(bootstrapBinaryPath, upgradeBinaryPath 
 	t.logsDir = logsDir
 
 	var envVars []string
+	// Set crash reporting URL to the empty string to disable Sentry crash reports.
+	envVars = append(envVars, "COCKROACH_CRASH_REPORTS=")
 	if strings.Contains(upgradeBinaryPath, "cockroach-short") {
 		// If we're using a cockroach-short binary, that means it was
 		// locally built, so we need to opt-out of version offsetting to
@@ -1862,14 +1864,6 @@ func (t *logicTest) newCluster(
 		); err != nil {
 			t.Fatal(err)
 		}
-
-		// Ensure that vector index background operations are deterministic, so
-		// that tests don't flake.
-		if _, err := conn.Exec(
-			"SET CLUSTER SETTING sql.vecindex.deterministic_fixups.enabled = true",
-		); err != nil {
-			t.Fatal(err)
-		}
 	}
 
 	if cfg.OverrideDistSQLMode != "" {
@@ -2001,9 +1995,6 @@ func (t *logicTest) setup(
 		skip.UnderStress(t.t(), "test takes a long time and downloads release artifacts")
 		if !bazel.BuiltWithBazel() {
 			skip.IgnoreLint(t.t(), "cockroach-go/testserver can only be uzed in bazel builds")
-		}
-		if runtime.GOARCH == "s390x" {
-			skip.IgnoreLint(t.t(), "cockroach-go/testserver is not operational on s390x")
 		}
 		if cfg.NumNodes != 3 {
 			t.Fatal("cockroach-go testserver tests must use 3 nodes")

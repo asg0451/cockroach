@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/keys"
@@ -53,6 +54,7 @@ var (
 		"bulkio.ingest.flush_delay",
 		"amount of time to wait before sending a file to the KV/Storage layer to ingest",
 		0,
+		settings.NonNegativeDuration,
 	)
 
 	senderConcurrency = settings.RegisterIntSetting(
@@ -645,9 +647,12 @@ func (b *SSTBatcher) doFlush(ctx context.Context, reason int) error {
 					resp, err := b.db.AdminScatter(ctx, splitAt, maxScatterSize)
 					b.currentStats.ScatterWait += timeutil.Since(beforeScatter)
 					if err != nil {
-						// err could be a max size violation, but this is unexpected since we
-						// split before, so a warning is probably ok.
-						log.Warningf(ctx, "%s failed to scatter	: %v", b.name, err)
+						// TODO(dt): switch to a typed error.
+						if strings.Contains(err.Error(), "existing range size") {
+							log.VEventf(ctx, 1, "%s scattered non-empty range rejected: %v", b.name, err)
+						} else {
+							log.Warningf(ctx, "%s failed to scatter	: %v", b.name, err)
+						}
 					} else {
 						b.currentStats.Scatters++
 						b.currentStats.ScatterMoved += resp.ReplicasScatteredBytes

@@ -207,6 +207,7 @@ nogo(
         "//pkg/testutils/lint/passes/returncheck",
         "//pkg/testutils/lint/passes/returnerrcheck",
         "//pkg/testutils/lint/passes/shadow",
+        "//pkg/testutils/lint/passes/timer",
         "//pkg/testutils/lint/passes/unconvert",
     ],
 )

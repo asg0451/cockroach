@@ -15,6 +15,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/schemaexpr"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/eval"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
@@ -111,22 +112,7 @@ func ShowCreateTable(
 		f.WriteString(",\n\tCONSTRAINT ")
 		formatQuoteNames(&f.Buffer, desc.GetPrimaryIndex().GetName())
 		f.WriteString(" ")
-		primaryIdxStr, err := catformat.IndexForDisplay(
-			ctx,
-			desc,
-			&descpb.AnonymousTable,
-			desc.GetPrimaryIndex(),
-			"", /* partition */
-			fmtFlags,
-			p.EvalContext(),
-			p.SemaCtx(),
-			p.SessionData(),
-			catformat.IndexDisplayDefOnly,
-		)
-		if err != nil {
-			return "", err
-		}
-		f.WriteString(primaryIdxStr)
+		f.WriteString(tabledesc.PrimaryKeyString(desc))
 	}
 
 	// TODO (lucy): Possibly include FKs in the mutations list here, or else

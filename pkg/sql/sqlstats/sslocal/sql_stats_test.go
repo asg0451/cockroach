@@ -320,7 +320,7 @@ func TestNodeLocalInMemoryViewDoesNotReturnPersistedStats(t *testing.T) {
 	defer cluster.Stopper().Stop(ctx)
 	server := cluster.Server(0 /* idx */).ApplicationLayer()
 
-	// Open two connections so that we can run statementsBySessionID without messing up
+	// Open two connections so that we can run statements without messing up
 	// the SQL stats.
 	testConn := server.SQLConn(t)
 	sqlDB := sqlutils.MakeSQLRunner(testConn)
@@ -455,15 +455,11 @@ func TestExplicitTxnFingerprintAccounting(t *testing.T) {
 		nil, /* knobs */
 	)
 
-	// TODO(xinhaoz): We'll come back and add the sql stats sink once we
-	// enable the SQL stats ingestion for sql stats.
-	ingester := sslocal.NewSQLStatsIngester(nil /* testing knobs */)
-
 	appStats := sqlStats.GetApplicationStats("" /* appName */)
 	statsCollector := sslocal.NewStatsCollector(
 		st,
 		appStats,
-		ingester,
+		nil,
 		sessionphase.NewTimes(),
 		sqlStats.GetCounters(),
 		false, /* underOuterTxn */
@@ -567,7 +563,7 @@ func TestAssociatingStmtStatsWithTxnFingerprint(t *testing.T) {
 		require.NoError(t, err)
 
 		// Construct the SQL Stats machinery.
-		insightsProvider := insights.New(st, insights.NewMetrics())
+		insightsProvider := insights.New(st, insights.NewMetrics(), nil)
 		sqlStats := sslocal.New(
 			st,
 			sqlstats.MaxMemSQLStatsStmtFingerprints,
@@ -578,12 +574,11 @@ func TestAssociatingStmtStatsWithTxnFingerprint(t *testing.T) {
 			nil,
 			nil,
 		)
-		ingester := sslocal.NewSQLStatsIngester(nil /* testing knobs */, insightsProvider)
 		appStats := sqlStats.GetApplicationStats("" /* appName */)
 		statsCollector := sslocal.NewStatsCollector(
 			st,
 			appStats,
-			ingester,
+			insightsProvider.Writer(),
 			sessionphase.NewTimes(),
 			sqlStats.GetCounters(),
 			false, /* underOuterTxn */
@@ -1347,7 +1342,7 @@ func TestSQLStatsIdleLatencies(t *testing.T) {
 			},
 		},
 		{
-			name:     "multiple statementsBySessionID - slow generation",
+			name:     "multiple statements - slow generation",
 			stmtLats: map[string]float64{"SELECT pg_sleep(_)": 0, "SELECT _": 0},
 			txnLat:   0,
 			ops: func(t *testing.T, db *gosql.DB) {
@@ -1419,8 +1414,8 @@ func TestSQLStatsIdleLatencies(t *testing.T) {
 			// Make a separate connection to the database, to isolate the stats
 			// we'll observe.
 			// Note that we're not using pgx here because it *always* prepares
-			// statementsBySessionID, and we want to test our client latency measurements
-			// both with and without prepared statementsBySessionID.
+			// statements, and we want to test our client latency measurements
+			// both with and without prepared statements.
 			opsDB := s.SQLConn(t)
 
 			// Set a unique application name for our session, so we can find our
@@ -1448,7 +1443,7 @@ func TestSQLStatsIdleLatencies(t *testing.T) {
 					actual[query] = latency
 				}
 				require.NoError(t, rows.Err())
-				// Ensure that all test case statementsBySessionID have at least the
+				// Ensure that all test case statements have at least the
 				// minimum expected idle latency and do not exceed the safety
 				// check cap.
 				for tc_stmt, tc_latency := range tc.stmtLats {
@@ -1717,7 +1712,7 @@ func TestSQLStats_DrainStats(t *testing.T) {
 }
 
 // TestSQLStatsInternalStatements verifies SQL stats are captured
-// for internal statementsBySessionID.
+// for internal statements.
 func TestSQLStatsInternalStatements(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
@@ -1728,7 +1723,7 @@ func TestSQLStatsInternalStatements(t *testing.T) {
 			SQLExecutor: &sql.ExecutorTestingKnobs{
 				// Disable to make the test deterministic.
 				// We'll be checking to ensure that the internal
-				// statementsBySessionID are only sampled once.
+				// statements are only sampled once.
 				DisableProbabilisticSampling: true,
 			},
 		},
@@ -1924,7 +1919,7 @@ func TestSQLStatsDiscardStatsOnFingerprintLimit(t *testing.T) {
 
 	tests := []testCase{
 		{
-			name:      "statementsBySessionID in transactions are counted towards the limit",
+			name:      "statements in transactions are counted towards the limit",
 			stmtLimit: 4,
 			stmts: []testExecs{
 				{0, "BEGIN; SELECT 1; SELECT 1, 2; SELECT 1, 2, 3; COMMIT;"},
@@ -1966,7 +1961,7 @@ func TestSQLStatsDiscardStatsOnFingerprintLimit(t *testing.T) {
 				{1, "SELECT 1; SELECT 2"},
 				{2, "SELECT 1; SELECT 2"},
 			},
-			// There should be 3 statementsBySessionID per connection since
+			// There should be 3 statements per connection since
 			// stmt stats are not limited.
 			totalSkipped: 5,
 			minStmts:     6,
@@ -1998,14 +1993,14 @@ func TestSQLStatsDiscardStatsOnFingerprintLimit(t *testing.T) {
 			}
 			resetMetricsForTest()
 
-			// Execute the statementsBySessionID assigned to each connection.
+			// Execute the statements assigned to each connection.
 			for _, exec := range tc.stmts {
 				conns[exec.connIdx].Exec(t, exec.stmt)
 			}
 
 			// Verify that the expected stats are present, and we've skipped a minimum
 			// number of stats the test expects. We use this as a minimum since internal
-			// statementsBySessionID may be executed in the background.
+			// statements may be executed in the background.
 			if tc.stmtLimit == 0 {
 				require.GreaterOrEqual(t, countStmts(), tc.minStmts)
 			} else {

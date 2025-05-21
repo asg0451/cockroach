@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/appstatspb"
-	"github.com/cockroachdb/cockroach/pkg/sql/clusterunique"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 )
 
@@ -48,6 +47,10 @@ type TestingKnobs struct {
 	// updated.
 	JobMonitorUpdateCheckInterval time.Duration
 
+	// SkipZoneConfigBootstrap used for backup tests where we want to skip
+	// the Zone Config TTL setup.
+	SkipZoneConfigBootstrap bool
+
 	// FlushInterceptor intercepts persistedsqlstats flush operation.
 	FlushInterceptor FlushFn
 
@@ -55,22 +58,6 @@ type TestingKnobs struct {
 	// It can be useful to invoke assertions right after in-memory stats flushed
 	// and cleared, and before new stats added to cache.
 	OnAfterClear func()
-
-	// OnIngesterSessionClear is a callback that is triggered when the ingester
-	// clears a session entry.
-	OnIngesterSessionClear func(sessionID clusterunique.ID)
-
-	// IngesterTxnInterceptor is a callback that's triggered when a txn insight
-	// is observed by the ingester. The callback is called instead of writing the
-	// insight to the buffer.
-	IngesterTxnInterceptor func(sessionID clusterunique.ID, transaction *RecordedTxnStats)
-
-	// IngesterStmtInterceptor is a callback that's triggered when a stmt insight
-	// is observed. The callback is called instead of writing the insight to the buffer.
-	IngesterStmtInterceptor func(sessionID clusterunique.ID, statement *RecordedStmtStats)
-
-	// OnIngesterFlush is a callback that is triggered when the ingester
-	OnIngesterFlush func()
 }
 
 // ModuleTestingKnobs implements base.ModuleTestingKnobs interface.

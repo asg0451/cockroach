@@ -1591,17 +1591,3 @@ func (hv *HistogramVec) ToPrometheusMetrics() []*prometheusgo.Metric {
 
 	return metrics
 }
-
-func MakeLabelPairs(labelNamesAndValues ...string) []*LabelPair {
-	if len(labelNamesAndValues)%2 != 0 {
-		panic("labelNamesAndValues must be a list with even length of label names and values")
-	}
-	labelPairs := make([]*LabelPair, 0, len(labelNamesAndValues)/2)
-	for i := 0; i < len(labelNamesAndValues); i += 2 {
-		labelPairs = append(labelPairs, &LabelPair{
-			Name:  &labelNamesAndValues[i],
-			Value: &labelNamesAndValues[i+1],
-		})
-	}
-	return labelPairs
-}

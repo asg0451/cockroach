@@ -3234,8 +3234,7 @@ var traceSnapshotThreshold = settings.RegisterDurationSetting(
 	"kv.trace.snapshot.enable_threshold",
 	"enables tracing and gathers timing information on all snapshots;"+
 		"snapshots with a duration longer than this threshold will have their "+
-		"trace logged (set to 0 to disable);",
-	0,
+		"trace logged (set to 0 to disable);", 0,
 )
 
 var externalFileSnapshotting = settings.RegisterBoolSetting(
@@ -4189,16 +4188,12 @@ func (r *Replica) adminScatter(
 	// Loop until we hit an error or until we hit `maxAttempts` for the range.
 	for re := retry.StartWithCtx(ctx, retryOpts); re.Next(); {
 		if currentAttempt == maxAttempts {
-			log.Eventf(ctx, "stopped scattering after hitting max %d attempts", maxAttempts)
 			break
 		}
 		desc, conf := r.DescAndSpanConfig()
 		_, err := rq.replicaCanBeProcessed(ctx, r, false /* acquireLeaseIfNeeded */)
 		if err != nil {
 			// The replica can not be processed, so skip it.
-			log.Warningf(ctx,
-				"failed to scatter range (%v) at %dth attempt: cannot process replica due to %v",
-				desc, currentAttempt+1, err)
 			break
 		}
 		_, err = rq.processOneChange(
@@ -4210,11 +4205,9 @@ func (r *Replica) adminScatter(
 			// issued, in which case the scatter may fail due to the range split
 			// updating the descriptor while processing.
 			if IsRetriableReplicationChangeError(err) {
-				log.Errorf(ctx, "retrying scatter process for range %v after retryable error: %v", desc, err)
+				log.VEventf(ctx, 1, "retrying scatter process after retryable error: %v", err)
 				continue
 			}
-			log.Warningf(ctx, "failed to scatter range (%v) at %dth attempt due to %v",
-				desc, currentAttempt+1, err)
 			break
 		}
 		currentAttempt++
@@ -4266,11 +4259,6 @@ func (r *Replica) adminScatter(
 		// that were moved so the value may not be entirely accurate, but it is
 		// adequate.
 		ReplicasScatteredBytes: stats.Total() * int64(numReplicasMoved),
-		// NB: this needs to be a separate field, since we can't reliably infer
-		// "no replica moved" from ReplicasScatteredBytes == 0. Empty ranges have
-		// stats.Total() == 0 and ReplicasScatteredBytes will be 0 regardless of
-		// whether any replicas were moved.
-		NoReplicasMoved: numReplicasMoved == 0,
 	}, nil
 }
 

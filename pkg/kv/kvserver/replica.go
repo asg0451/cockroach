@@ -1089,6 +1089,9 @@ type Replica struct {
 		// Requires Replica.raftMu be held when providing logical ops and
 		//  informing the processor of closed timestamp updates. This properly
 		//  synchronizes updates that are linearized and driven by the Raft log.
+		//
+		// proc should only be accessed via getRangefeedProcessorAndFilter or
+		// getRangefeedProcessor in nearly all cases.
 		proc rangefeed.Processor
 		// opFilter is a best-effort filter that informs the raft processing
 		// goroutine of which logical operations the rangefeed processor is
@@ -1403,9 +1406,9 @@ func (r *Replica) closedTimestampPolicyRLocked() ctpb.RangeClosedTimestampPolicy
 }
 
 // RefreshPolicy updates the replica's cached closed timestamp policy based on
-// span configurations and provided node round-trip latencies.
+// span configurations and provided node latencies.
 func (r *Replica) RefreshPolicy(latencies map[roachpb.NodeID]time.Duration) {
-	computeNewPolicy := func(oldPolicy ctpb.RangeClosedTimestampPolicy) ctpb.RangeClosedTimestampPolicy {
+	policy := func() ctpb.RangeClosedTimestampPolicy {
 		desc, conf := r.DescAndSpanConfig()
 		// The node liveness range ignores zone configs and always uses a
 		// LAG_BY_CLUSTER_SETTING closed timestamp policy. If it was to begin
@@ -1430,31 +1433,16 @@ func (r *Replica) RefreshPolicy(latencies map[roachpb.NodeID]time.Duration) {
 		// policy bucket. This then controls how far in the future timestamps will
 		// be closed for the range.
 		maxLatency := time.Duration(-1)
-		replicaLatencyInfoMissing := false
 		for _, peer := range desc.InternalReplicas {
 			peerLatency := closedts.DefaultMaxNetworkRTT
 			if latency, ok := latencies[peer.NodeID]; ok {
 				peerLatency = latency
-			} else {
-				replicaLatencyInfoMissing = true
 			}
 			maxLatency = max(maxLatency, peerLatency)
 		}
-		if replicaLatencyInfoMissing {
-			r.store.metrics.ClosedTimestampLatencyInfoMissing.Inc(1)
-		}
-		return closedts.FindBucketBasedOnNetworkRTTWithDampening(
-			oldPolicy,
-			maxLatency,
-			closedts.PolicySwitchWhenLatencyExceedsBucketFraction.Get(&r.store.GetStoreConfig().Settings.SV),
-		)
+		return closedts.FindBucketBasedOnNetworkRTT(maxLatency)
 	}
-	oldPolicy := ctpb.RangeClosedTimestampPolicy(r.cachedClosedTimestampPolicy.Load())
-	newPolicy := computeNewPolicy(oldPolicy)
-	if newPolicy != oldPolicy {
-		r.store.metrics.ClosedTimestampPolicyChange.Inc(1)
-		r.cachedClosedTimestampPolicy.Store(int32(newPolicy))
-	}
+	r.cachedClosedTimestampPolicy.Store(int32(policy()))
 }
 
 // NodeID returns the ID of the node this replica belongs to.

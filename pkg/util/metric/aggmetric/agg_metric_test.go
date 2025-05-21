@@ -309,7 +309,9 @@ func TestAggMetricClear(t *testing.T) {
 	})
 
 	c.clear()
+	d.mu.Lock()
 	d.mu.children.Clear()
+	d.mu.Unlock()
 
 	t.Run("post clear", func(t *testing.T) {
 		testFile := "aggMetric_post_clear.txt"

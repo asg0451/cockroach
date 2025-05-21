@@ -31,6 +31,7 @@ import (
 	"github.com/cockroachdb/errors"
 	"github.com/jackc/pgx/v5"
 	"github.com/spf13/pflag"
+	randold "golang.org/x/exp/rand"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -136,14 +137,6 @@ type tpcc struct {
 	resetTableCancelFn context.CancelFunc
 
 	asOfSystemTime string
-
-	// Set to true if a literal implemenation of the workload is desired. In
-	// this case "literal" means that the New Order and Payments transactions
-	// are implemented statement-by-statement as specified in the specification.
-	// This avoids the use of RETURNING clauses to batch updates together with
-	// selects, and performs each row select/update separately, as opposed to
-	// batching them using an IN list.
-	literalImplementation bool
 }
 
 type waitSetter struct {
@@ -324,7 +317,6 @@ var tpccMeta = workload.Meta{
 		g.flags.StringVar(&g.asOfSystemTime, "aost", "",
 			"This is an optional parameter to specify AOST; used exclusively in conjunction with the TPC-C consistency "+
 				"check. Example values are (\"'-1m'\", \"'-1h'\")")
-		g.flags.BoolVar(&g.literalImplementation, "literal-implementation", false, "If true, use a literal implementation of the TPC-C kit instead of an optimized version")
 
 		RandomSeed.AddFlag(&g.flags)
 		g.connFlags = workload.NewConnFlags(&g.flags)
@@ -493,11 +485,9 @@ func (w *tpcc) Hooks() workload.Hooks {
 				if err != nil {
 					return errors.Wrap(err, "error creating multi-region partitioner")
 				}
-				w.auditor = newAuditor(w.activeWarehouses, w.wMRPart, w.affinityPartitions)
-			} else {
-				w.auditor = newAuditor(w.activeWarehouses, w.wPart, w.affinityPartitions)
 			}
 
+			w.auditor = newAuditor(w.activeWarehouses, w.wPart, w.affinityPartitions)
 			return initializeMix(w)
 		},
 		PreCreate: func(db *gosql.DB) error {
@@ -672,6 +662,9 @@ func (w *tpcc) Tables() []workload.Table {
 	aCharsInit := workloadimpl.PrecomputedRandInit(rand.NewPCG(seed, 0), precomputedLength, aCharsAlphabet)
 	lettersInit := workloadimpl.PrecomputedRandInit(rand.NewPCG(seed, 0), precomputedLength, lettersAlphabet)
 	numbersInit := workloadimpl.PrecomputedRandInit(rand.NewPCG(seed, 0), precomputedLength, numbersAlphabet)
+	aCharsInitOld := workloadimpl.PrecomputedRandInit(randold.New(randold.NewSource(seed)), precomputedLength, aCharsAlphabet)
+	lettersInitOld := workloadimpl.PrecomputedRandInit(randold.New(randold.NewSource(seed)), precomputedLength, lettersAlphabet)
+	numbersInitOld := workloadimpl.PrecomputedRandInit(randold.New(randold.NewSource(seed)), precomputedLength, numbersAlphabet)
 	if w.localsPool == nil {
 		w.localsPool = &sync.Pool{
 			New: func() interface{} {
@@ -684,6 +677,15 @@ func (w *tpcc) Tables() []workload.Table {
 						aChars:  aCharsInit(),
 						letters: lettersInit(),
 						numbers: numbersInit(),
+					},
+					rngOld: tpccRandOld{
+						Rand: randold.New(randold.NewSource(uint64(timeutil.Now().UnixNano()))),
+						// Intentionally wait until here to initialize the precomputed rands
+						// so a caller of Tables that only wants schema doesn't compute
+						// them.
+						aChars:  aCharsInitOld(),
+						letters: lettersInitOld(),
+						numbers: numbersInitOld(),
 					},
 				}
 			},

@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/fs"
 	"net"
 	"net/http"
 	"net/url"
@@ -3177,30 +3176,4 @@ func FetchLogs(
 			dest := filepath.Join(destination, "logs/cockroach.log")
 			return errors.Wrap(c.Get(ctx, l, c.Nodes, "logs/redacted/combined.log" /* src */, dest), "cluster.FetchLogs")
 		})
-}
-
-// FetchCertsDir downloads the certs directory from the cluster using `roachprod get`
-// and ensures the files are not world readable.
-func FetchCertsDir(
-	ctx context.Context, l *logger.Logger, clusterName, certsDir, destinationDir string,
-) error {
-	c, err := GetClusterFromCache(l, clusterName)
-	if err != nil {
-		return err
-	}
-
-	if err = c.Get(ctx, l, c.Nodes, certsDir, destinationDir); err != nil {
-		return err
-	}
-
-	// Need to prevent world readable files or lib/pq will complain.
-	return filepath.WalkDir(destinationDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return errors.Wrap(err, "walking localCertsDir failed")
-		}
-		if d.IsDir() {
-			return nil
-		}
-		return os.Chmod(path, 0600)
-	})
 }

@@ -4348,7 +4348,7 @@ func TestChangefeedEnrichedWithDiff(t *testing.T) {
 		assertion func(topic string) []string
 	}{
 		{
-			name: "json with diff", options: []string{"diff", "format=json"}, sinks: []string{"kafka", "pubsub", "sinkless", "webhook", "cloudstorage"},
+			name: "json with diff", options: []string{"diff", "format=json"}, sinks: []string{"kafka", "pubsub", "sinkless", "webhook"},
 			assertion: func(topic string) []string {
 				return []string{
 					fmt.Sprintf(`%s: {"a": 0}->{"after": {"a": 0, "b": "dog"}, "before": null, "op": "c"}`, topic),
@@ -4536,7 +4536,6 @@ func TestChangefeedEnrichedSourceWithDataAvro(t *testing.T) {
 		})
 	})
 }
-
 func TestChangefeedEnrichedSourceWithDataJSON(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
@@ -4632,7 +4631,7 @@ func TestChangefeedEnrichedSourceWithDataJSON(t *testing.T) {
 					assertPayloadsEnriched(t, testFeed, []string{`foo: {"i": 0}->{"after": {"i": 0}, "op": "c"}`}, sourceAssertion)
 				}
 			}
-			for _, sink := range []string{"kafka", "pubsub", "sinkless", "cloudstorage"} {
+			for _, sink := range []string{"kafka", "pubsub", "sinkless"} {
 				testLocality := roachpb.Locality{
 					Tiers: []roachpb.Tier{{
 						Key:   "region",
@@ -5195,7 +5194,7 @@ func TestChangefeedFailOnTableOffline(t *testing.T) {
 		// Start an import job which will immediately pause after ingestion
 		sqlDB.Exec(t, "SET CLUSTER SETTING jobs.debug.pausepoints = 'import.after_ingest';")
 		go func() {
-			sqlDB.ExpectErrWithRetry(t, `pause point`, `IMPORT INTO for_import CSV DATA ($1);`, `result is ambiguous`, dataSrv.URL)
+			sqlDB.ExpectErrWithTimeout(t, `pause point`, `IMPORT INTO for_import CSV DATA ($1);`, dataSrv.URL)
 		}()
 		sqlDB.CheckQueryResultsRetry(
 			t,
@@ -6132,8 +6131,6 @@ func TestChangefeedJobUpdateFailsIfNotClaimed(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	skip.WithIssue(t, 144912)
-
 	// Set TestingKnobs to return a known session for easier
 	// comparison.
 	adoptionInterval := 20 * time.Minute
@@ -6561,7 +6558,7 @@ func TestChangefeedErrors(t *testing.T) {
 	)
 
 	sqlDB.ExpectErrWithTimeout(
-		t, `request timestamp .* too far in future`,
+		t, `timestamp '.*' is in the future`,
 		`EXPERIMENTAL CHANGEFEED FOR foo WITH cursor=$1`, timeutil.Now().Add(time.Hour),
 	)
 
@@ -7117,7 +7114,7 @@ func TestChangefeedErrors(t *testing.T) {
 	)
 	sqlDB.ExpectErrWithTimeout(
 		t, `this sink is incompatible with envelope=enriched`,
-		`CREATE CHANGEFEED FOR foo INTO 'pulsar://.' WITH envelope=enriched`,
+		`CREATE CHANGEFEED FOR foo INTO 'nodelocal://.' WITH envelope=enriched`,
 	)
 	sqlDB.ExpectErrWithTimeout(
 		t, `enriched_properties is only usable with envelope=enriched`,
@@ -7975,7 +7972,7 @@ func TestChangefeedHandlesRollingRestart(t *testing.T) {
 
 		// Even though checkpointing was disabled, when we drain, an attempt is
 		// made to persist up-to-date checkpoint.
-		require.NoError(t, jf.TickHighWaterMark(beforeInsert))
+		require.NoError(t, jf.WaitForHighWaterMark(beforeInsert))
 
 		// Let the retry proceed.
 		ctx, cancel = context.WithTimeout(context.Background(), time.Second*60)
@@ -8933,20 +8930,6 @@ func TestFlushJitter(t *testing.T) {
 			flushFrequency:        100 * time.Millisecond,
 			jitter:                0.1,
 			expectedFlushDuration: 100 * time.Millisecond,
-			expectedErr:           false,
-		},
-		// Expect actual jitter to be 0 since flushFrequency * jitter < 1.
-		{
-			flushFrequency:        1,
-			jitter:                0.1,
-			expectedFlushDuration: 1,
-			expectedErr:           false,
-		},
-		// Expect actual jitter to be 0 since flushFrequency * jitter < 1.
-		{
-			flushFrequency:        10,
-			jitter:                0.01,
-			expectedFlushDuration: 10,
 			expectedErr:           false,
 		},
 	} {
@@ -11468,11 +11451,7 @@ func TestCDCQuerySelectSingleRow(t *testing.T) {
 		}
 		cfKnobs := knobs.DistSQL.(*execinfra.TestingKnobs).Changefeed.(*TestingKnobs)
 		cfKnobs.HandleDistChangefeedError = func(err error) error {
-			// Only capture the first error -- that's enough for the test.
-			select {
-			case errCh <- err:
-			default:
-			}
+			errCh <- err
 			return err
 		}
 	}

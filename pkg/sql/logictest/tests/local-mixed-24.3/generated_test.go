@@ -563,13 +563,6 @@ func TestLogic_dependencies(
 	runLogicTest(t, "dependencies")
 }
 
-func TestLogic_direct_columnar_scans(
-	t *testing.T,
-) {
-	defer leaktest.AfterTest(t)()
-	runLogicTest(t, "direct_columnar_scans")
-}
-
 func TestLogic_discard(
 	t *testing.T,
 ) {

@@ -615,13 +615,6 @@ func TestReadCommittedLogic_dependencies(
 	runLogicTest(t, "dependencies")
 }
 
-func TestReadCommittedLogic_direct_columnar_scans(
-	t *testing.T,
-) {
-	defer leaktest.AfterTest(t)()
-	runLogicTest(t, "direct_columnar_scans")
-}
-
 func TestReadCommittedLogic_discard(
 	t *testing.T,
 ) {

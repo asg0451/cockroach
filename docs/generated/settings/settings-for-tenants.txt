@@ -115,6 +115,7 @@ server.auth_log.sql_sessions.enabled	boolean	false	if set, log verbose SQL sessi
 server.authentication_cache.enabled	boolean	true	enables a cache used during authentication to avoid lookups to system tables when retrieving per-user authentication-related information	application
 server.child_metrics.enabled	boolean	false	enables the exporting of child metrics, additional prometheus time series with extra labels	application
 server.child_metrics.include_aggregate.enabled	boolean	true	include the reporting of the aggregate time series when child metrics are enabled. This cluster setting has no effect if child metrics are disabled.	application
+server.client_cert_expiration_cache.capacity	integer	1000	the maximum number of client cert expirations stored	application
 server.clock.forward_jump_check.enabled (alias: server.clock.forward_jump_check_enabled)	boolean	false	if enabled, forward clock jumps > max_offset/2 will cause a panic	application
 server.clock.persist_upper_bound_interval	duration	0s	the interval between persisting the wall time upper bound of the clock. The clock does not generate a wall time greater than the persisted timestamp and will panic if it sees a wall time greater than this value. When cockroach starts, it waits for the wall time to catch-up till this persisted timestamp. This guarantees monotonic wall time across server restarts. Not setting this or setting a value of 0 disables this feature.	application
 server.eventlog.enabled	boolean	true	if set, logged notable events are also stored in the table system.eventlog	application
@@ -413,4 +414,4 @@ trace.zipkin.collector	string		the address of a Zipkin instance to receive trace
 ui.database_locality_metadata.enabled	boolean	true	if enabled shows extended locality data about databases and tables in DB Console which can be expensive to compute	application
 ui.default_timezone	string		the default timezone used to format timestamps in the ui	application
 ui.display_timezone	enumeration	etc/utc	the timezone used to format timestamps in the ui. This setting is deprecatedand will be removed in a future version. Use the 'ui.default_timezone' setting instead. 'ui.default_timezone' takes precedence over this setting. [etc/utc = 0, america/new_york = 1]	application
-version	version	1000025.2-upgrading-to-1000025.3-step-002	set the active cluster version in the format '<major>.<minor>'	application
+version	version	25.2	set the active cluster version in the format '<major>.<minor>'	application

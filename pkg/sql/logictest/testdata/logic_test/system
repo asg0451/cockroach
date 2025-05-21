@@ -315,7 +315,6 @@ cluster.secret
 diagnostics.reporting.enabled
 feature.vector_index.enabled
 sql.crdb_internal.table_row_statistics.as_of_time
-sql.vecindex.deterministic_fixups.enabled
 version
 
 onlyif config 3node-tenant-default-configs
@@ -333,7 +332,6 @@ cluster.secret
 diagnostics.reporting.enabled
 feature.vector_index.enabled
 sql.crdb_internal.table_row_statistics.as_of_time
-sql.vecindex.deterministic_fixups.enabled
 version
 
 statement ok
@@ -357,7 +355,6 @@ diagnostics.reporting.enabled                      true
 feature.vector_index.enabled                       true
 somesetting                                        somevalue
 sql.crdb_internal.table_row_statistics.as_of_time  -1µs
-sql.vecindex.deterministic_fixups.enabled          true
 
 onlyif config 3node-tenant-default-configs
 query TT
@@ -375,7 +372,6 @@ diagnostics.reporting.enabled                      true
 feature.vector_index.enabled                       true
 somesetting                                        somevalue
 sql.crdb_internal.table_row_statistics.as_of_time  -1µs
-sql.vecindex.deterministic_fixups.enabled          true
 
 user testuser
 
