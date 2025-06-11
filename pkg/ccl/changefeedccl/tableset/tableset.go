@@ -171,14 +171,20 @@ func (w *Watcher) Start(ctx context.Context, initialTS hlc.Timestamp) error {
 	rf := w.execCfg.RangeFeedFactory.New(
 		fmt.Sprintf("tableset.watcher.id=%s", w.id), initialTS, onValue, opts...,
 	)
+	defer rf.Close()
+
+	fmt.Printf("starting rangefeed\n")
 
 	if err := rf.StartFromFrontier(ctx, frontier); err != nil {
 		return err
 	}
 
+	fmt.Printf("rangefeed started\n")
+
 	// wait for shutdown due to error or context cancellation
 	select {
 	case err := <-errCh:
+		fmt.Printf("shutting down due to error: %v\n", err)
 		return err
 	case <-ctx.Done():
 		return ctx.Err()

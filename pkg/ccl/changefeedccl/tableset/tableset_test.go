@@ -7,6 +7,7 @@ package tableset
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -27,7 +28,8 @@ func TestTablesetDebug(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	_ = cancel
 	s, db, _ := serverutils.StartServer(t, base.TestServerArgs{})
 	defer s.Stopper().Stop(ctx)
 
@@ -56,10 +58,23 @@ func TestTablesetDebug(t *testing.T) {
 		return watcher.Start(ctx, ts)
 	})
 
-	time.AfterFunc(10*time.Second, func() {
-		db.Exec("create table foo (id int primary key)")
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+
+	eg.Go(func() error {
+		for i := 0; ; i++ {
+			select {
+			case <-ticker.C:
+				db.Exec(fmt.Sprintf("create table foo_%d (id int primary key)", i))
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
 	})
 
-	require.NoError(t, eg.Wait())
+	// time.AfterFunc(10*time.Second, func() {
+	// 	cancel()
+	// })
 
+	require.NoError(t, eg.Wait())
 }
