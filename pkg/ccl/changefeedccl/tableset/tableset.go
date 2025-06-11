@@ -143,17 +143,21 @@ func (w *Watcher) Start(ctx context.Context, initialTS hlc.Timestamp) error {
 		rangefeed.WithConsumerID(int64(42)),
 		rangefeed.WithInvoker(func(fn func() error) error { return fn() }),
 		rangefeed.WithFiltering(false),
+		rangefeed.WithInitialScan(func(ctx context.Context) {
+			fmt.Printf("initial scan done\n")
+		}),
 	}
 
-	// find family to watch
-	var indexID descpb.IndexID
-	for _, family := range systemschema.NamespaceTable.TableDescriptor.TableDesc().Families {
-		if family.Name == "fam_4_id" {
-			indexID = descpb.IndexID(family.ID)
-			break
-		}
-	}
-	watchSpans := roachpb.Spans{systemschema.NamespaceTable.TableDescriptor.IndexSpan(w.execCfg.Codec, indexID)}
+	// // find family to watch
+	// var indexID descpb.IndexID
+	// for _, family := range systemschema.NamespaceTable.TableDescriptor.TableDesc().Families {
+	// 	if family.Name == "fam_4_id" {
+	// 		indexID = descpb.IndexID(family.ID)
+	// 		break
+	// 	}
+	// }
+	// watchSpans := roachpb.Spans{systemschema.NamespaceTable.IndexSpan(w.execCfg.Codec, indexID)}
+	watchSpans := roachpb.Spans{systemschema.NamespaceTable.TableSpan(w.execCfg.Codec)}
 
 	frontier, err := span.MakeFrontier(watchSpans...)
 	if err != nil {
