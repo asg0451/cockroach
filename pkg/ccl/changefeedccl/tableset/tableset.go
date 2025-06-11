@@ -21,7 +21,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/systemschema"
-	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/cockroach/pkg/util/span"
@@ -74,7 +73,6 @@ func (w *Watcher) Start(ctx context.Context, initialTS hlc.Timestamp) error {
 	acc := w.mon.MakeBoundAccount()
 
 	errCh := make(chan error, 1)
-	streamCh := make(chan tree.Datums)
 
 	setErr := func(err error) {
 		if err == nil {
@@ -86,12 +84,12 @@ func (w *Watcher) Start(ctx context.Context, initialTS hlc.Timestamp) error {
 		}
 	}
 
-	// TODO: in reality we want to watch the family fam_4_id, and the key is (parentID, parentSchemaID, name)
 	var cfTargets changefeedbase.Targets
 	cfTargets.Add(changefeedbase.Target{
-		Type:              jobspb.ChangefeedTargetSpecification_PRIMARY_FAMILY_ONLY,
 		TableID:           systemschema.NamespaceTable.TableDescriptor.GetID(),
 		StatementTimeName: changefeedbase.StatementTimeName(systemschema.NamespaceTable.TableDescriptor.TableDesc().Name),
+		Type:              jobspb.ChangefeedTargetSpecification_COLUMN_FAMILY,
+		FamilyName:        "fam_4_id",
 	})
 	dec, err := cdcevent.NewEventDecoder(ctx, w.execCfg, cfTargets, false, false)
 	if err != nil {
@@ -114,7 +112,24 @@ func (w *Watcher) Start(ctx context.Context, initialTS hlc.Timestamp) error {
 		}
 	}
 	// called with ordinary rangefeed values
-	onValue := func(ctx context.Context, value *kvpb.RangeFeedValue) {}
+	onValue := func(ctx context.Context, kv *kvpb.RangeFeedValue) {
+		if !kv.Value.IsPresent() {
+			return
+		}
+		pbkv, pbkvPrev := roachpb.KeyValue{Key: kv.Key, Value: kv.Value}, roachpb.KeyValue{Key: kv.Key, Value: kv.PrevValue}
+		row, err := dec.DecodeKV(ctx, pbkv, cdcevent.CurrentRow, kv.Value.Timestamp, false)
+		if err != nil {
+			setErr(err)
+			return
+		}
+		rowPrev, err := dec.DecodeKV(ctx, pbkvPrev, cdcevent.PrevRow, kv.Value.Timestamp, false)
+		if err != nil {
+			setErr(err)
+			return
+		}
+		fmt.Printf("row: %+v\n", row)
+		fmt.Printf("rowPrev: %+v\n", rowPrev)
+	}
 
 	// Common rangefeed options.
 	opts := []rangefeed.Option{
@@ -130,7 +145,15 @@ func (w *Watcher) Start(ctx context.Context, initialTS hlc.Timestamp) error {
 		rangefeed.WithFiltering(false),
 	}
 
-	watchSpans := roachpb.Spans{systemschema.NamespaceTable.TableDescriptor.PrimaryIndexSpan(w.execCfg.Codec)}
+	// find family to watch
+	var indexID descpb.IndexID
+	for _, family := range systemschema.NamespaceTable.TableDescriptor.TableDesc().Families {
+		if family.Name == "fam_4_id" {
+			indexID = descpb.IndexID(family.ID)
+			break
+		}
+	}
+	watchSpans := roachpb.Spans{systemschema.NamespaceTable.TableDescriptor.IndexSpan(w.execCfg.Codec, indexID)}
 
 	frontier, err := span.MakeFrontier(watchSpans...)
 	if err != nil {
@@ -139,7 +162,7 @@ func (w *Watcher) Start(ctx context.Context, initialTS hlc.Timestamp) error {
 	frontier = span.MakeConcurrentFrontier(frontier)
 	defer frontier.Release()
 
-	// is this our buffer size? do we need this?
+	// TODO: is this our buffer size? do we need this?
 	if err := acc.Grow(ctx, 1024); err != nil {
 		return errors.Wrapf(err, "failed to allocated %d bytes from monitor", 1024)
 	}
