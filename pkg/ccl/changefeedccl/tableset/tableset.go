@@ -9,6 +9,7 @@ package tableset
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/cdcevent"
@@ -19,8 +20,10 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvpb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/systemschema"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/cockroach/pkg/util/span"
@@ -84,16 +87,43 @@ func (w *Watcher) Start(ctx context.Context, initialTS hlc.Timestamp) error {
 		}
 	}
 
+	// TODO: should really be on system.descriptor too/instead
+
 	var cfTargets changefeedbase.Targets
+	// TODO: not getting any data except id when i specify that fam
+	// cfTargets.Add(changefeedbase.Target{
+	// 	TableID:           systemschema.NamespaceTable.TableDescriptor.GetID(),
+	// 	StatementTimeName: changefeedbase.StatementTimeName(systemschema.NamespaceTable.TableDescriptor.TableDesc().Name),
+	// 	Type:              jobspb.ChangefeedTargetSpecification_COLUMN_FAMILY,
+	// 	FamilyName:        "fam_4_id",
+	// })
 	cfTargets.Add(changefeedbase.Target{
-		TableID:           systemschema.NamespaceTable.TableDescriptor.GetID(),
-		StatementTimeName: changefeedbase.StatementTimeName(systemschema.NamespaceTable.TableDescriptor.TableDesc().Name),
-		Type:              jobspb.ChangefeedTargetSpecification_COLUMN_FAMILY,
-		FamilyName:        "fam_4_id",
+		TableID:           systemschema.NamespaceTable.GetID(),
+		StatementTimeName: changefeedbase.StatementTimeName(systemschema.NamespaceTable.GetName()),
+		Type:              jobspb.ChangefeedTargetSpecification_EACH_FAMILY,
 	})
 	dec, err := cdcevent.NewEventDecoder(ctx, w.execCfg, cfTargets, false, false)
 	if err != nil {
 		return err
+	}
+
+	prettyRow := func(row cdcevent.Row) string {
+		var b strings.Builder
+		fmt.Fprintf(&b, "Row{")
+		err := row.ForEachColumn().Datum(func(d tree.Datum, col cdcevent.ResultColumn) error {
+			fmt.Fprintf(&b, "%s: %+v, ", col.Name, d)
+			return nil
+		})
+		if err != nil {
+			return "err: " + err.Error()
+		}
+		fmt.Fprintf(&b, "}")
+		return b.String()
+	}
+
+	prettyKey := func(key roachpb.Key) string {
+		tablePrefix := w.execCfg.Codec.TablePrefix(uint32(systemschema.NamespaceTable.GetID()))
+		return catalogkeys.PrettyKey(nil, tablePrefix, -1)
 	}
 
 	// called from initial scans and maybe other places (catchups?)
@@ -108,7 +138,7 @@ func (w *Watcher) Start(ctx context.Context, initialTS hlc.Timestamp) error {
 				setErr(err)
 				return
 			}
-			fmt.Printf("row: %+v\n", row)
+			fmt.Printf("(scan?) row: key=%s, %s\n", prettyKey(kv.Key), prettyRow(row))
 		}
 	}
 	// called with ordinary rangefeed values
@@ -127,8 +157,9 @@ func (w *Watcher) Start(ctx context.Context, initialTS hlc.Timestamp) error {
 			setErr(err)
 			return
 		}
-		fmt.Printf("row: %+v\n", row)
-		fmt.Printf("rowPrev: %+v\n", rowPrev)
+		fmt.Printf("row: key=%s, %s\n", prettyKey(kv.Key), prettyRow(row))
+		fmt.Printf("rowPrev: key=%s, %s\n", prettyKey(kv.Key), prettyRow(rowPrev))
+
 	}
 
 	// Common rangefeed options.
