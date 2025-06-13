@@ -122,8 +122,7 @@ func (w *Watcher) Start(ctx context.Context, initialTS hlc.Timestamp) error {
 	}
 
 	prettyKey := func(key roachpb.Key) string {
-		tablePrefix := w.execCfg.Codec.TablePrefix(uint32(systemschema.NamespaceTable.GetID()))
-		return catalogkeys.PrettyKey(nil, tablePrefix, -1)
+		return catalogkeys.PrettyKey(nil, key, -1)
 	}
 
 	// called from initial scans and maybe other places (catchups?)
@@ -157,9 +156,12 @@ func (w *Watcher) Start(ctx context.Context, initialTS hlc.Timestamp) error {
 			setErr(err)
 			return
 		}
+
+		// PRIMARY KEY ("parentID" ASC, "parentSchemaID" ASC, name ASC),
+		// key=/NamespaceTable/30/1/100/101/"foo_42"/4/1, Row{id: 146, }
+		// tableid=30; idx=1; parentid=100; parentschemaid=101; name="foo_42"; familyid=4; family=1..?
 		fmt.Printf("row: key=%s, %s\n", prettyKey(kv.Key), prettyRow(row))
 		fmt.Printf("rowPrev: key=%s, %s\n", prettyKey(kv.Key), prettyRow(rowPrev))
-
 	}
 
 	// Common rangefeed options.
