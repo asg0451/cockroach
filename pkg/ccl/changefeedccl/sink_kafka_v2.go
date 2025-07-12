@@ -47,6 +47,7 @@ type kafkaSinkClientV2 struct {
 	recordResize        func(numRecords int64)
 
 	topicsForConnectionCheck []string
+	createTopicsManually     bool
 
 	// we need to fetch and keep track of this ourselves since kgo doesnt expose metadata to us
 	metadataMu struct {
@@ -68,6 +69,7 @@ func newKafkaSinkClientV2(
 	knobs kafkaSinkV2Knobs,
 	mb metricsRecorderBuilder,
 	topicsForConnectionCheck []string,
+	createTopics changefeedbase.CreateKafkaTopics,
 ) (*kafkaSinkClientV2, error) {
 	bootstrapBrokers := strings.Split(bootstrapAddrsStr, `,`)
 
@@ -82,8 +84,6 @@ func newKafkaSinkClientV2(
 		kgo.ProducerBatchMaxBytes(256 << 20), // 256MiB
 		kgo.BrokerMaxWriteBytes(1 << 30),     // 1GiB
 
-		kgo.AllowAutoTopicCreation(),
-
 		kgo.RecordRetries(5),
 		// This applies only to non-produce requests, ie the ListTopics call.
 		kgo.RequestRetries(5),
@@ -93,6 +93,10 @@ func newKafkaSinkClientV2(
 		kgo.ProducerOnDataLossDetected(func(topic string, part int32) {
 			log.Errorf(ctx, `kafka sink detected data loss for topic %s partition %d`, redact.SafeString(topic), redact.SafeInt(part))
 		}),
+	}
+
+	if createTopics == changefeedbase.CreateKafkaTopicsAuto {
+		baseOpts = append(baseOpts, kgo.AllowAutoTopicCreation())
 	}
 
 	recordResize := func(numRecords int64) {}
@@ -128,6 +132,7 @@ func newKafkaSinkClientV2(
 		includeErrorDetails:      changefeedbase.KafkaV2ErrorDetailsEnabled.Get(&settings.SV),
 		recordResize:             recordResize,
 		topicsForConnectionCheck: topicsForConnectionCheck,
+		createTopicsManually:     createTopics == changefeedbase.CreateKafkaTopicsYes,
 	}
 	c.metadataMu.allTopicPartitions = make(map[string][]int32)
 
@@ -361,6 +366,7 @@ func makeKafkaSinkV2(
 	settings *cluster.Settings,
 	mb metricsRecorderBuilder,
 	knobs kafkaSinkV2Knobs,
+	createTopics changefeedbase.CreateKafkaTopics,
 ) (Sink, error) {
 	batchCfg, retryOpts, err := getSinkConfigFromJson(jsonConfig, sinkJSONConfig{
 		// Defaults from the v1 sink - flush immediately.
@@ -400,7 +406,7 @@ func makeKafkaSinkV2(
 	}
 
 	topicsForConnectionCheck := topicNamer.DisplayNamesSlice()
-	client, err := newKafkaSinkClientV2(ctx, clientOpts, batchCfg, u.Host, settings, knobs, mb, topicsForConnectionCheck)
+	client, err := newKafkaSinkClientV2(ctx, clientOpts, batchCfg, u.Host, settings, knobs, mb, topicsForConnectionCheck, createTopics)
 	if err != nil {
 		return nil, err
 	}
