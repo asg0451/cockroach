@@ -63,6 +63,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/redact"
+	"github.com/twmb/franz-go/pkg/kadm"
+	"github.com/twmb/franz-go/pkg/kerr"
+	"github.com/twmb/franz-go/pkg/kgo"
 )
 
 // featureChangefeedEnabled is used to enable and disable the CHANGEFEED feature.
@@ -1513,6 +1516,10 @@ func (b *changefeedResumer) resumeWithRetries(
 		b.mu.perNodeAggregatorStats[componentID] = *meta
 	}
 
+	if err := maybeCreateKafkaTopics(ctx, jobID, details, execCfg); err != nil {
+		return err
+	}
+
 	maxBackoff := changefeedbase.MaxRetryBackoff.Get(&execCfg.Settings.SV)
 	backoffReset := changefeedbase.RetryBackoffReset.Get(&execCfg.Settings.SV)
 	for r := getRetry(ctx, maxBackoff, backoffReset); r.Next(); {
@@ -2045,4 +2052,93 @@ func maybeUpgradePreProductionReadyExpression(
 		"Existing changefeed needs to be recreated using new syntax. "+
 		"Please see CDC documentation on the use of new cdc_prev tuple.",
 		tree.AsString(oldExpression), tree.AsString(newExpression))
+}
+
+func maybeCreateKafkaTopics(ctx context.Context, jobID jobspb.JobID, details jobspb.ChangefeedDetails, execCfg *sql.ExecutorConfig) error {
+	ctx, span := tracing.ChildSpan(ctx, "maybeCreateKafkaTopics")
+	defer span.Finish()
+
+	createTopics, err := changefeedbase.MakeStatementOptions(details.Opts).GetCreateKafkaTopics()
+	if err != nil {
+		return err
+	}
+
+	if createTopics != changefeedbase.CreateKafkaTopicsYes {
+		return nil
+	}
+
+	parsedSinkURL, err := url.Parse(details.SinkURI)
+	if err != nil {
+		return err
+	}
+
+	if !isKafkaSink(parsedSinkURL) {
+		return nil
+	}
+
+	// TODO: pull this out from sink.go and sink_kafka_v2.go so we get all the right auth stuff etc.
+	kcli, err := kgo.NewClient(kgo.SeedBrokers(parsedSinkURL.Host))
+	if err != nil {
+		return err
+	}
+	defer kcli.Close()
+	kacli := kadm.NewClient(kcli)
+
+	// TODO: ditto for topic namer stuff
+	allTargets := AllTargets(details)
+	topics := make([]string, 0, allTargets.Size)
+	if err := allTargets.EachTarget(func(target changefeedbase.Target) error {
+		topics = append(topics, string(target.StatementTimeName))
+		return nil
+	}); err != nil {
+		return err
+	}
+
+	topicDetails, err := kacli.ListTopics(ctx, topics...)
+	if err != nil {
+		return err
+	}
+
+	seenTopics := make(map[string]struct{})
+	for topic, topicDetail := range topicDetails {
+		if topicDetail.Err != nil {
+			return err
+		}
+		seenTopics[topic] = struct{}{}
+	}
+
+	missingTopics := make([]string, 0, len(topics))
+	for _, topic := range topics {
+		if _, ok := seenTopics[topic]; !ok {
+			missingTopics = append(missingTopics, topic)
+		}
+	}
+
+	if len(missingTopics) == 0 {
+		return nil
+	}
+
+	vctresp, err := kacli.ValidateCreateTopics(ctx, -1, -1, nil, missingTopics...)
+	if err != nil {
+		return err
+	}
+	for topic, vtr := range vctresp {
+		if vtr.Err != nil && !errors.Is(vtr.Err, kerr.TopicAlreadyExists) {
+			return errors.Wrapf(vtr.Err, "failed to validate topic creation for topic %s", topic)
+		}
+	}
+
+	ctresp, err := kacli.CreateTopics(ctx, -1, -1, nil, missingTopics...)
+	if err != nil {
+		return err
+	}
+
+	for topic, tr := range ctresp {
+		if tr.Err != nil && !errors.Is(tr.Err, kerr.TopicAlreadyExists) {
+			return errors.Wrapf(tr.Err, "failed to create topic %s", topic)
+		}
+		log.Infof(ctx, "created topic %s with (numPartitions: %d, replicationFactor: %d, configs: %+v)", topic, tr.NumPartitions, tr.ReplicationFactor, tr.Configs)
+	}
+
+	return nil
 }
