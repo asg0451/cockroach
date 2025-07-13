@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/url"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/backup/backupresolver"
@@ -65,7 +66,8 @@ import (
 	"github.com/cockroachdb/redact"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kerr"
-	"github.com/twmb/franz-go/pkg/kgo"
+	"github.com/twmb/franz-go/pkg/kmsg"
+	"github.com/twmb/franz-go/pkg/kversion"
 )
 
 // featureChangefeedEnabled is used to enable and disable the CHANGEFEED feature.
@@ -2058,11 +2060,11 @@ func maybeCreateKafkaTopics(ctx context.Context, jobID jobspb.JobID, details job
 	ctx, span := tracing.ChildSpan(ctx, "maybeCreateKafkaTopics")
 	defer span.Finish()
 
-	createTopics, err := changefeedbase.MakeStatementOptions(details.Opts).GetCreateKafkaTopics()
+	opts := changefeedbase.MakeStatementOptions(details.Opts)
+	createTopics, err := opts.GetCreateKafkaTopics()
 	if err != nil {
 		return err
 	}
-
 	if createTopics != changefeedbase.CreateKafkaTopicsYes {
 		return nil
 	}
@@ -2071,74 +2073,98 @@ func maybeCreateKafkaTopics(ctx context.Context, jobID jobspb.JobID, details job
 	if err != nil {
 		return err
 	}
-
 	if !isKafkaSink(parsedSinkURL) {
 		return nil
 	}
 
-	// TODO: pull this out from sink.go and sink_kafka_v2.go so we get all the right auth stuff etc.
-	kcli, err := kgo.NewClient(kgo.SeedBrokers(parsedSinkURL.Host))
+	sinkURL := &changefeedbase.SinkURL{URL: parsedSinkURL}
+
+	// Build a TopicNamer and derive the exact set of topic names for this changefeed.
+	topicNamer, err := buildKafkaTopicNamer(AllTargets(details), sinkURL)
 	if err != nil {
 		return err
 	}
-	defer kcli.Close()
-	kacli := kadm.NewClient(kcli)
+	topics := topicNamer.DisplayNamesSlice()
 
-	// TODO: ditto for topic namer stuff
-	allTargets := AllTargets(details)
-	topics := make([]string, 0, allTargets.Size)
-	if err := allTargets.EachTarget(func(target changefeedbase.Target) error {
-		topics = append(topics, string(target.StatementTimeName))
+	// Build kafka client & admin using shared helper.
+	bootstrapBrokers := strings.Split(sinkURL.Host, `,`)
+	clientOpts, err := buildKgoConfig(ctx, sinkURL, opts.GetKafkaConfigJSON(), nil /* netMetrics */)
+	if err != nil {
+		return err
+	}
+	client, adminClient, err := buildKafkaClients(ctx, bootstrapBrokers, false /* allowAutoTopic */, clientOpts, kafkaSinkV2Knobs{})
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+
+	// version check -- only kafka 2.4+ supports create topics with default values (-1)
+	// lmao this sucks
+	v24 := kversion.V2_4_0()
+	v24kvm, ok := v24.LookupMaxKeyVersion(kmsg.CreateTopics.Int16())
+	if !ok {
+		return errors.AssertionFailedf("v2.4.0 does not support create topics but it should")
+	}
+
+	vr, err := adminClient.(*kadm.Client).ApiVersions(ctx)
+	if err != nil {
+		return err
+	}
+	log.Infof(ctx, "api versions: %+v", vr)
+	for bid, ver := range vr {
+		if ver.Err != nil {
+			return errors.Wrapf(ver.Err, "failed to get api versions for broker %d", bid)
+		}
+		mv, ok := ver.KeyMinVersion(kmsg.CreateTopics.Int16())
+		if !ok {
+			return errors.Errorf("broker %d does not support create topics", bid)
+		}
+		if mv < v24kvm {
+			return errors.Errorf("broker %d does not support create topics at >= v2.4.0 level", bid)
+		}
+	}
+
+	// Determine which topics are missing.
+	detailsResp, err := adminClient.ListTopics(ctx, topics...)
+	if err != nil {
+		return err
+	}
+	missing := make([]string, 0, len(topics))
+	for _, t := range topics {
+		d, ok := detailsResp[t]
+		if !ok || d.Err != nil {
+			missing = append(missing, t)
+		}
+	}
+	if len(missing) == 0 {
 		return nil
-	}); err != nil {
-		return err
 	}
 
-	topicDetails, err := kacli.ListTopics(ctx, topics...)
+	// We need full kadm client for topic creation APIs.
+	kadmClient, ok := adminClient.(*kadm.Client)
+	if !ok {
+		return errors.New("admin client does not support topic creation APIs")
+	}
+
+	vresp, err := kadmClient.ValidateCreateTopics(ctx, -1, -1, nil, missing...)
 	if err != nil {
 		return err
 	}
-
-	seenTopics := make(map[string]struct{})
-	for topic, topicDetail := range topicDetails {
-		if topicDetail.Err != nil {
-			return err
-		}
-		seenTopics[topic] = struct{}{}
-	}
-
-	missingTopics := make([]string, 0, len(topics))
-	for _, topic := range topics {
-		if _, ok := seenTopics[topic]; !ok {
-			missingTopics = append(missingTopics, topic)
+	for topic, r := range vresp {
+		if r.Err != nil && !errors.Is(r.Err, kerr.TopicAlreadyExists) {
+			return errors.Wrapf(r.Err, "failed to validate topic creation for topic %s", topic)
 		}
 	}
 
-	if len(missingTopics) == 0 {
-		return nil
-	}
-
-	vctresp, err := kacli.ValidateCreateTopics(ctx, -1, -1, nil, missingTopics...)
+	cresp, err := kadmClient.CreateTopics(ctx, -1, -1, nil, missing...)
 	if err != nil {
 		return err
 	}
-	for topic, vtr := range vctresp {
-		if vtr.Err != nil && !errors.Is(vtr.Err, kerr.TopicAlreadyExists) {
-			return errors.Wrapf(vtr.Err, "failed to validate topic creation for topic %s", topic)
+	for topic, r := range cresp {
+		if r.Err != nil && !errors.Is(r.Err, kerr.TopicAlreadyExists) {
+			return errors.Wrapf(r.Err, "failed to create topic %s", topic)
 		}
+		log.Infof(ctx, "created topic %s with (numPartitions: %d, replicationFactor: %d, configs: %+v)", topic, r.NumPartitions, r.ReplicationFactor, r.Configs)
 	}
-
-	ctresp, err := kacli.CreateTopics(ctx, -1, -1, nil, missingTopics...)
-	if err != nil {
-		return err
-	}
-
-	for topic, tr := range ctresp {
-		if tr.Err != nil && !errors.Is(tr.Err, kerr.TopicAlreadyExists) {
-			return errors.Wrapf(tr.Err, "failed to create topic %s", topic)
-		}
-		log.Infof(ctx, "created topic %s with (numPartitions: %d, replicationFactor: %d, configs: %+v)", topic, tr.NumPartitions, tr.ReplicationFactor, tr.Configs)
-	}
-
 	return nil
 }
