@@ -11821,24 +11821,6 @@ func TestCloudstorageParallelCompression(t *testing.T) {
 	})
 }
 
-func TestChangefeedKafkaTopicCreation(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
-	// kafka := kfake.NewCluster(kfake.AllowAutoTopicCreation(), kfake.DefaultNumPartitions())
-
-	testFn := func(t *testing.T, s TestServer, f cdctest.TestFeedFactory) {
-		sqlDB := sqlutils.MakeSQLRunner(s.DB)
-		sqlDB.Exec(t, `SET CLUSTER SETTING changefeed.new_kafka_sink.enabled = true`)
-		sqlDB.Exec(t, `CREATE TABLE foo (id int primary key, s string)`)
-
-		feed := feed(t, f, `CREATE CHANGEFEED FOR foo WITH create_kafka_topics=yes`)
-		defer closeFeed(t, feed)
-
-	}
-	cdcTest(t, testFn, feedTestForceSink("kafka"))
-}
-
 func TestDatabaseLevelChangefeed(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)

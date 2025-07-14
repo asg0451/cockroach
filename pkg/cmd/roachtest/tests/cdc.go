@@ -20,6 +20,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
+	"maps"
 	"math/big"
 	"math/rand"
 	"net"
@@ -31,6 +32,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -715,6 +717,10 @@ func (ct *cdcTester) waitForWorkload() {
 }
 
 func (cj *changefeedJob) waitForCompletion() {
+	cj.waitForCompletionContext(cj.ctx)
+}
+
+func (cj *changefeedJob) waitForCompletionContext(ctx context.Context) {
 	completionCh := make(chan struct{})
 	err := cj.runFeedPoller(cj.ctx, time.Second, completionCh, func(info *changefeedInfo) {
 		if info.status == "succeeded" || info.status == "failed" {
@@ -2552,6 +2558,51 @@ func registerCDC(r registry.Registry) {
 			}, time.Minute)
 		},
 	})
+
+	r.Add(registry.TestSpec{
+		Name:    "cdc/kafka-create-topics",
+		Owner:   `cdc`,
+		Cluster: r.MakeClusterSpec(4, spec.WorkloadNode(), spec.Arch(vm.ArchAMD64)),
+		Leases:  registry.MetamorphicLeases,
+		// Disabled on IBM due to lack of Kafka support on s390x.
+		CompatibleClouds: registry.OnlyGCE,
+		Suites:           registry.Suites(registry.Nightly),
+		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
+			ct := newCDCTester(ctx, t, c)
+			defer ct.Close()
+
+			ct.runTPCCWorkload(tpccArgs{warehouses: 1, duration: "10s"})
+
+			// TODO: different versions
+			kafka, cleanup := setupKafka(ctx, t, c, c.Node(c.Spec().NodeCount))
+			defer cleanup()
+
+			db := c.Conn(ctx, t.L(), 1)
+			defer stopFeeds(db)
+
+			ct.waitForWorkload()
+
+			feed := ct.newChangefeed(feedArgs{
+				sinkType: kafkaSink,
+				targets:  allTpccTargets,
+				opts:     map[string]string{"initial_scan": "'only'"},
+			})
+
+			ctx, cancel := context.WithTimeout(ctx, 1*time.Minute)
+			defer cancel()
+
+			feed.waitForCompletionContext(ctx)
+			if ctx.Err() != nil {
+				t.Fatalf("changefeed assertion timed out: %v", ctx.Err())
+			}
+
+			// make sure all topics were created
+			topics, err := kafka.listTopics(ctx)
+			require.NoError(t, err)
+			require.ElementsMatch(t, topics, allTpccTargets)
+		},
+	})
+
 	r.Add(registry.TestSpec{
 		Name:             "cdc/kafka-azure",
 		Owner:            `cdc`,
@@ -3675,6 +3726,28 @@ func (k kafkaManager) createTopic(ctx context.Context, topic string) error {
 			ReplicationFactor: 1,
 		}, false)
 	})
+}
+
+func (k kafkaManager) listTopics(ctx context.Context) ([]string, error) {
+	var topics []string
+	kafkaAddrs := []string{k.consumerURL(ctx)}
+	config := sarama.NewConfig()
+	err := retry.ForDuration(kafkaCreateTopicRetryDuration, func() error {
+		admin, err := sarama.NewClusterAdmin(kafkaAddrs, config)
+		if err != nil {
+			return errors.Wrap(err, "admin client")
+		}
+		resp, err := admin.ListTopics()
+		if err != nil {
+			return errors.Wrap(err, "list topics")
+		}
+		topics = slices.Collect(maps.Keys(resp))
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return topics, nil
 }
 
 func (k kafkaManager) newConsumer(
