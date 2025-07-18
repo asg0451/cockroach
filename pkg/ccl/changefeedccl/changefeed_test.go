@@ -108,6 +108,9 @@ import (
 	"github.com/lib/pq"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/twmb/franz-go/pkg/kadm"
+	"github.com/twmb/franz-go/pkg/kfake"
+	"github.com/twmb/franz-go/pkg/kgo"
 )
 
 var testServerRegion = "us-east-1"
@@ -11819,6 +11822,59 @@ func TestCloudstorageParallelCompression(t *testing.T) {
 			time.Sleep(checkStatusInterval)
 		}
 	})
+}
+
+func TestChangefeedCreateKafkaTopics(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	ctx := context.Background()
+
+	kafka, err := kfake.NewCluster(
+		kfake.DefaultNumPartitions(13),
+		kfake.WithLogger(kfake.BasicLogger(os.Stdout, kfake.LogLevelDebug)),
+	)
+	require.NoError(t, err)
+	defer kafka.Close()
+
+	kcli, err := kgo.NewClient(kgo.SeedBrokers(kafka.ListenAddrs()...))
+	require.NoError(t, err)
+	defer kcli.Close()
+	kadmCli := kadm.NewClient(kcli)
+
+	_, db, stopServer := startTestFullServer(t, feedTestOptions{})
+	defer stopServer()
+	sqlDB := sqlutils.MakeSQLRunner(db)
+
+	sqlDB.Exec(t, `SET CLUSTER SETTING changefeed.new_kafka_sink.enabled = true`)
+	sqlDB.Exec(t, `CREATE TABLE foo (key INT PRIMARY KEY);`)
+	sqlDB.Exec(t, `CREATE TABLE bar (key INT PRIMARY KEY);`)
+	sqlDB.Exec(t, `INSERT INTO foo VALUES (1);`)
+	sqlDB.Exec(t, `INSERT INTO bar VALUES (1);`)
+
+	feedRow := sqlDB.QueryRow(t,
+		fmt.Sprintf(`CREATE CHANGEFEED FOR foo, bar INTO 'kafka://%s' WITH end_time='%d', create_kafka_topics='yes'`,
+			strings.Join(kafka.ListenAddrs(), ","),
+			timeutil.Now().Add(5*time.Second).UnixNano(),
+		),
+	)
+	var jobID int
+	feedRow.Scan(&jobID)
+
+	waitForJobState(sqlDB, t, jobspb.JobID(jobID), jobs.StateSucceeded)
+
+	// NOTE: kfake doesnt seem to respect the validateonly flag, so it doesnt do
+	// exactly the same thing as a regular kafka, though the result is the same.
+
+	topics, err := kadmCli.ListTopics(ctx)
+	require.NoError(t, err)
+	require.NoError(t, topics.Error())
+
+	require.Equal(t, 2, len(topics))
+	require.Contains(t, topics, "foo")
+	require.Contains(t, topics, "bar")
+	require.Len(t, topics["foo"].Partitions, 13)
+	require.Len(t, topics["bar"].Partitions, 13)
 }
 
 func TestDatabaseLevelChangefeed(t *testing.T) {

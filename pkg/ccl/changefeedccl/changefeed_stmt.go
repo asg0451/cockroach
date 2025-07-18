@@ -2115,7 +2115,7 @@ func maybeCreateKafkaTopics(ctx context.Context, jobID jobspb.JobID, details job
 		if ver.Err != nil {
 			return errors.Wrapf(ver.Err, "failed to get api versions for broker %d", bid)
 		}
-		mv, ok := ver.KeyMinVersion(kmsg.CreateTopics.Int16())
+		mv, ok := ver.KeyMaxVersion(kmsg.CreateTopics.Int16())
 		if !ok {
 			return errors.Errorf("broker %d does not support create topics", bid)
 		}
@@ -2132,7 +2132,10 @@ func maybeCreateKafkaTopics(ctx context.Context, jobID jobspb.JobID, details job
 	missing := make([]string, 0, len(topics))
 	for _, t := range topics {
 		d, ok := detailsResp[t]
-		if !ok || d.Err != nil {
+		if d.Err != nil && !errors.Is(d.Err, kerr.UnknownTopicOrPartition) {
+			return errors.Wrapf(d.Err, "failed to list topic %s", t)
+		}
+		if !ok || (d.Err != nil && errors.Is(d.Err, kerr.UnknownTopicOrPartition)) {
 			missing = append(missing, t)
 		}
 	}
