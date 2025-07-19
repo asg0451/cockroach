@@ -69,6 +69,7 @@ import (
 	"github.com/cockroachdb/errors"
 	prompb "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/expfmt"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/oauth2/clientcredentials"
 )
@@ -724,6 +725,7 @@ func (cj *changefeedJob) waitForCompletionContext(ctx context.Context) error {
 	completionCh := make(chan struct{})
 	err := cj.runFeedPoller(ctx, time.Second, completionCh, func(info *changefeedInfo) {
 		if info.status == "succeeded" || info.status == "failed" {
+			cj.logger.Printf("changefeed %s completed with status %s", cj.Label(), info.status)
 			close(completionCh)
 		}
 	})
@@ -2594,12 +2596,13 @@ func registerCDC(r registry.Registry) {
 
 		err := feed.waitForCompletionContext(ctx)
 		if !version.supportsCreateTopicsDefaults() {
-			require.ErrorIs(t, err, context.DeadlineExceeded)
+			assert.ErrorIsf(t, err, context.DeadlineExceeded, "expected deadline exceeded error, got %v", err)
 			// we couldnt create the topics, and that's what we expect
 			topics, err := kafka.listTopics(ctx)
 			require.NoError(t, err)
-			require.NotSubset(t, slices.Collect(maps.Keys(topics)), []string{"t", "t2"})
-			t.L().Printf("failed to create topics and that's ok")
+			assert.NotSubset(t, slices.Collect(maps.Keys(topics)), []string{"t", "t2"})
+			fmt.Printf("topics: %v\n", topics)
+			return
 		} else {
 			require.NoError(t, err)
 		}
@@ -3059,7 +3062,7 @@ const (
 func (v kafkaVersion) installBase() string {
 	switch v {
 	case kafkaVersion2_3:
-		return "confluent-5.0.0"
+		return "confluent-5.3.0"
 	case kafkaVersion2_7:
 		return "confluent-6.1.0"
 	case kafkaVersion3_4:
@@ -3554,6 +3557,7 @@ func (k kafkaManager) addSCRAMUsers(ctx context.Context) {
 
 func (k kafkaManager) start(ctx context.Context, service string, envVars ...string) {
 	// This isn't necessary for the nightly tests, but it's nice for iteration.
+	k.t.Status("starting kafka")
 	k.c.Run(ctx, option.WithNodes(k.kafkaSinkNodes), k.makeCommand("confluent", "local destroy || true"))
 	k.restart(ctx, service, envVars...)
 	// Wait for kafka to be ready. Otherwise we can sometimes try to connect to

@@ -1518,16 +1518,18 @@ func (b *changefeedResumer) resumeWithRetries(
 		b.mu.perNodeAggregatorStats[componentID] = *meta
 	}
 
-	if err := maybeCreateKafkaTopics(ctx, jobID, details, execCfg); err != nil {
-		return err
-	}
-
 	maxBackoff := changefeedbase.MaxRetryBackoff.Get(&execCfg.Settings.SV)
 	backoffReset := changefeedbase.RetryBackoffReset.Get(&execCfg.Settings.SV)
 	for r := getRetry(ctx, maxBackoff, backoffReset); r.Next(); {
-		flowErr := maybeUpgradePreProductionReadyExpression(ctx, jobID, details, jobExec)
+		flowErr := func() error {
+			if err := maybeCreateKafkaTopics(ctx, jobID, details, execCfg); err != nil {
+				return errors.Wrap(err, "failed to create kafka topics")
+			}
 
-		if flowErr == nil {
+			if err := maybeUpgradePreProductionReadyExpression(ctx, jobID, details, jobExec); err != nil {
+				return errors.Wrap(err, "failed to upgrade pre-production ready expression")
+			}
+
 			// startedCh is normally used to signal back to the creator of the job that
 			// the job has started; however, in this case nothing will ever receive
 			// on the channel, causing the changefeed flow to block. Replace it with
@@ -1563,21 +1565,20 @@ func (b *changefeedResumer) resumeWithRetries(
 					}
 				}
 			})
-
-			flowErr = g.Wait()
-
-			if flowErr == nil {
+			err := g.Wait()
+			if err == nil {
 				return nil // Changefeed completed -- e.g. due to initial_scan=only mode.
 			}
-
-			if errors.Is(flowErr, replanErr) {
+			if errors.Is(err, replanErr) {
 				log.Infof(ctx, "restarting changefeed due to updated configuration")
-				continue
+				return err
 			}
 
-			if knobs != nil && knobs.HandleDistChangefeedError != nil {
-				flowErr = knobs.HandleDistChangefeedError(flowErr)
-			}
+			return nil
+		}()
+
+		if knobs != nil && knobs.HandleDistChangefeedError != nil {
+			flowErr = knobs.HandleDistChangefeedError(flowErr)
 		}
 
 		// Terminate changefeed if needed.
