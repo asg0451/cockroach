@@ -270,7 +270,7 @@ func (f *cloudStorageSinkFile) Write(p []byte) (int, error) {
 // ordered exactly as they were emitted. Xi lexically precedes X(i-1), for i in
 // Nat, for all job sessions X. The naming convention described above guarantees
 // this.
-// 3. Data files are named using the successor of the "local frontier" timestamp as of the
+// 3. Data files are named using the successor of the "local frontier" timestamp as of the /// ?
 // time the last `Flush()` call was made (or StatementTime in case `Flush()` hasn't been
 // called yet). Since all EmitRow calls are guaranteed to be for rows that equal or
 // succeed this timestamp, ts(Xi) is an inclusive lower bound for the rows contained

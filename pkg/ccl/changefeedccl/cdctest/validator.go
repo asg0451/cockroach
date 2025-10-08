@@ -157,10 +157,12 @@ func (v *orderValidator) NoteRow(
 	if len(timestampValueTuples) > 0 &&
 		updated.Less(timestampValueTuples[len(timestampValueTuples)-1].ts) {
 		v.failures = append(v.failures, fmt.Sprintf(
-			`topic %s partition %s: saw new row timestamp %s after %s was seen`,
+			`topic %s partition %s: saw new row timestamp %s after %s was seen. key: %s, new row value: %v`,
 			v.topic, partition,
 			updated.AsOfSystemTime(),
 			timestampValueTuples[len(timestampValueTuples)-1].ts.AsOfSystemTime(),
+			key,
+			value,
 		))
 	}
 	latestResolved := v.resolved[partition]

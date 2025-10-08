@@ -395,7 +395,7 @@ func (ca *changeAggregator) Start(ctx context.Context) {
 	opts := feed.Opts
 
 	timestampOracle := &changeAggregatorLowerBoundOracle{
-		sf:                         ca.frontier,
+		sf:                         ca.frontier, // we now update the frontier more regularly
 		initialInclusiveLowerBound: feed.ScanTime,
 	}
 
@@ -678,6 +678,7 @@ func (ca *changeAggregator) setupSpansAndFrontier() (spans []roachpb.Span, err e
 			return nil, errors.Wrapf(err, "failed to restore frontier")
 		}
 	}
+	log.Changefeed.VInfof(ca.Ctx(), 2, "restored frontier: %s", ca.frontier)
 
 	return spans, nil
 }
@@ -973,7 +974,7 @@ func (ca *changeAggregator) emitResolved(batch jobspb.ResolvedSpans) error {
 			RecentKvCount: ca.recentKVCount,
 		},
 	}
-	if log.V(2) {
+	if log.V(2) { // TODO: when does this occur in the sequence of things
 		log.Changefeed.Infof(ca.Ctx(), "progress update to be sent to change frontier: %#v", progressUpdate)
 	}
 	updateBytes, err := protoutil.Marshal(&progressUpdate)

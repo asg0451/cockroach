@@ -20,10 +20,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -61,6 +59,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
+	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/redact"
 	"github.com/golang/mock/gomock"
@@ -1104,7 +1103,7 @@ var cloudFeedFileRE = regexp.MustCompile(`^\d{33}-(.+?)-(\d+)-(\d+)-([0-9a-fA-F]
 var feedIdx int32
 
 func feedSubDir() string {
-	return strconv.Itoa(int(atomic.AddInt32(&feedIdx, 1)))
+	return uuid.NewV4().String()
 }
 
 type cloudFeedFactory struct {
@@ -1645,6 +1644,7 @@ func (c *cloudFeed) walkDir(path string, d fs.DirEntry, err error) error {
 	// cloud storage uses a different delimiter. Let tests be agnostic.
 	topic = strings.Replace(topic, `+`, `.`, -1)
 
+	log.Changefeed.VInfof(context.Background(), 2, "reading file %s", path)
 	f, err := os.Open(path)
 	if err != nil {
 		return err
@@ -1684,10 +1684,12 @@ func (c *cloudFeed) walkDir(path string, d fs.DirEntry, err error) error {
 				return err
 			}
 			if isNew := c.markSeen(m); !isNew {
+				log.Changefeed.VInfof(context.Background(), 2, "skipping duplicate message %s", path)
 				continue
 			}
 			m.Resolved = nil
 			c.rows = append(c.rows, m)
+			log.Changefeed.VInfof(context.Background(), 2, "added message %s: %s", string(m.Key), string(m.Value))
 		case changefeedbase.OptFormatCSV:
 			c.rows = append(c.rows, m)
 		default:
