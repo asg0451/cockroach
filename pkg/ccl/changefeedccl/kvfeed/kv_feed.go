@@ -486,9 +486,14 @@ func isPrimaryKeyChange(
 // watched span have been seen (i.e. frontier.smallestTS).
 func (f *kvFeed) scanIfShould(
 	ctx context.Context, initialScan bool, initialScanOnly bool, resumeFrontier span.Frontier,
-) ([]roachpb.Span, hlc.Timestamp, error) {
+) (_ []roachpb.Span, scannedUpTo hlc.Timestamp, retErr error) {
 	ctx, sp := tracing.ChildSpan(ctx, "changefeed.kvfeed.scan_if_should")
 	defer sp.Finish()
+
+	defer func() {
+		log.Changefeed.VInfof(ctx, 2, "scanIfShould completed: (initialScan=%t, initialScanOnly=%t, len(spans)=%d, resumeFrontier=%s) -> (scannedUpTo=%s, err=%v)",
+			initialScan, initialScanOnly, len(f.spans), resumeFrontier, scannedUpTo, retErr)
+	}()
 
 	highWater := resumeFrontier.Frontier()
 	scanTime := func() hlc.Timestamp {

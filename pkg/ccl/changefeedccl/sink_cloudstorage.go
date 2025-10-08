@@ -37,6 +37,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/crlib/crtime"
 	"github.com/cockroachdb/errors"
+
 	// Placeholder for pgzip and zdstd.
 	_ "github.com/klauspost/compress/zstd"
 	_ "github.com/klauspost/pgzip"
@@ -644,7 +645,7 @@ func (s *cloudStorageSink) EmitResolvedTimestamp(
 	part := resolved.GoTime().Format(s.partitionFormat)
 	filename := fmt.Sprintf(`%s.RESOLVED`, cloudStorageFormatTime(resolved))
 	if log.V(1) {
-		log.Changefeed.Infof(ctx, "writing file %s %s", filename, resolved.AsOfSystemTime())
+
 	}
 	return cloud.WriteFile(ctx, s.es, filepath.Join(part, filename), bytes.NewReader(payload))
 }
@@ -739,6 +740,8 @@ func (s *cloudStorageSink) setDataFileTimestamp() {
 	// to use for naming files until the next `Flush()`. See comment on cloudStorageSink
 	// for an overview of the naming convention and proof of correctness.
 	ts := s.timestampOracle.inclusiveLowerBoundTS()
+
+	log.Changefeed.VInfof(context.TODO(), 2, "setting timestamp from %s to %s", s.dataFileTs, ts)
 	s.dataFileTs = cloudStorageFormatTime(ts)
 	s.dataFilePartition = ts.GoTime().Format(s.partitionFormat)
 }
@@ -809,6 +812,9 @@ func (s *cloudStorageSink) flushFile(ctx context.Context, file *cloudStorageSink
 	// same timestamp. This works because ascii `-` < ascii '.'.
 	filename := fmt.Sprintf(`%s-%s-%d-%d-%08x-%s-%x%s`, s.dataFileTs,
 		s.jobSessionID, s.srcID, s.sinkID, fileID, file.topic, file.schemaID, s.ext)
+
+	log.Changefeed.VInfof(ctx, 2, "flushing file %s", filename)
+
 	if s.prevFilename != "" && filename < s.prevFilename {
 		err := errors.AssertionFailedf("error: detected a filename %s that lexically "+
 			"precedes a file emitted before: %s", filename, s.prevFilename)

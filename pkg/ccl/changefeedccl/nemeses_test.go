@@ -46,7 +46,7 @@ func TestChangefeedNemeses(t *testing.T) {
 				sqlDB.Exec(t, "SET CLUSTER SETTING sql.defaults.create_table_with_schema_locked='false'")
 
 			}
-			sqlDB.Exec(t, "select crdb_internal.set_vmodule('event_processing=9,testfeed_test=9,sink_cloudstorage=9,changefeed_processors=9')")
+			sqlDB.Exec(t, "select crdb_internal.set_vmodule('event_processing=9,testfeed_test=9,sink_cloudstorage=9,changefeed_processors=9,kv_feed=9')")
 			v, err := cdctest.RunNemesis(f, s.DB, t.Name(), withLegacySchemaChanger, rng, nop)
 			if err != nil {
 				t.Fatalf("%+v", err)
