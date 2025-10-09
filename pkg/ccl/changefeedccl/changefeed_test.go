@@ -18,7 +18,6 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
-	"os/fs"
 	"path"
 	"path/filepath"
 	"reflect"
