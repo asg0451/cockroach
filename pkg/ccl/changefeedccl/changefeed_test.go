@@ -12805,6 +12805,20 @@ func TestCloudStorageFeedOrderingIssue(t *testing.T) {
 
 		ef.Pause()
 
+		// wait until no .tmp files are left
+		for {
+			files, err := os.ReadDir(feed.(*cloudFeed).dir)
+			require.NoError(t, err)
+			for _, file := range files {
+				if strings.HasSuffix(file.Name(), ".tmp") {
+					continue
+				}
+			}
+			break
+		}
+
+		t.Logf("no tmp files left")
+
 		validator := cdctest.NewOrderValidator("foo")
 		require.NoError(t, filepath.Walk(feed.(*cloudFeed).dir, func(path string, d os.FileInfo, err error) error {
 			require.NoError(t, err)
@@ -12820,18 +12834,23 @@ func TestCloudStorageFeedOrderingIssue(t *testing.T) {
 			contents, err := os.ReadFile(path)
 			require.NoError(t, err)
 
-			var row struct {
-				After struct {
-					ID int `json:"id"`
-				} `json:"after"`
-				Key     gojson.RawMessage `json:"key"`
-				Topic   string            `json:"topic"`
-				Updated string            `json:"updated"`
-			}
-			require.NoError(t, gojson.Unmarshal(contents, &row))
+			nl := 0
+			for _, line := range strings.Split(string(contents), "\n") {
+				var row struct {
+					After struct {
+						ID int `json:"id"`
+					} `json:"after"`
+					Key     gojson.RawMessage `json:"key"`
+					Topic   string            `json:"topic"`
+					Updated string            `json:"updated"`
+				}
 
-			updated := parseTimeToHLC(t, row.Updated)
-			require.NoError(t, validator.NoteRow(cloudFeedPartition, string(row.Key), row.Topic, updated, "foo"))
+				require.NoError(t, gojson.Unmarshal([]byte(line), &row))
+				updated := parseTimeToHLC(t, row.Updated)
+				require.NoError(t, validator.NoteRow(cloudFeedPartition, string(row.Key), row.Topic, updated, "foo"))
+				nl++
+			}
+			t.Logf("read %d lines from %s", nl, path)
 			return nil
 		}))
 		require.Empty(t, validator.Failures())
