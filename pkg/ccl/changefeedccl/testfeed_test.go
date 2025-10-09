@@ -1192,7 +1192,7 @@ func (f *cloudFeedFactory) Feed(
 	// TODO(dan): This is a pretty unsatisfying way to test that the uri passes
 	// through params it doesn't understand to ExternalStorage.
 	sinkURI += `?should_be=ignored`
-	sinkURI += `&file_size=1` // hack
+	// 	sinkURI += `&file_size=1` // hack
 	if err := setURI(createStmt, sinkURI, false, &args); err != nil {
 		return nil, err
 	}

@@ -12791,17 +12791,32 @@ func TestCloudStorageFeedOrderingIssue(t *testing.T) {
 		})
 
 		inserts := 0
+		var pauseLockoutUntil time.Time
+		var paused bool
 		for start := timeutil.Now(); timeutil.Since(start) < 60*time.Second; {
 			switch rand.Intn(10) {
 			case 0, 1, 2, 3, 4, 5, 6, 7:
 				inserts++
 				sqlDB.Exec(t, `INSERT INTO foo VALUES ($1);`, inserts+2)
 			case 8:
+				if timeutil.Now().Before(pauseLockoutUntil) {
+					continue
+				}
+				t.Logf("pausing feed")
 				ef.Pause()
+				paused = true
+				pauseLockoutUntil = timeutil.Now().Add(1 * time.Second)
 			case 9:
+				if !paused {
+					continue
+				}
+				t.Logf("resuming feed")
 				ef.Resume()
+				paused = false
 			}
 		}
+
+		t.Logf("inserted %d rows", inserts)
 
 		ef.Pause()
 
@@ -12859,10 +12874,14 @@ func TestCloudStorageFeedOrderingIssue(t *testing.T) {
 				require.NoError(t, validator.NoteRow(cloudFeedPartition, string(row.Key), row.Topic, updated, "foo"))
 				nl++
 			}
-			t.Logf("read %d lines from %s", nl, path)
+			// t.Logf("read %d lines from %s", nl, path)
 			return nil
 		}))
 		require.Empty(t, validator.Failures())
 	}
-	cdcTest(t, testFn, feedTestForceSink("cloudstorage"))
+	cdcTest(t, testFn, feedTestForceSink("cloudstorage"), withKnobsFn(func(knobs *base.TestingKnobs) {
+		knobs.DistSQL.(*execinfra.TestingKnobs).Changefeed.(*TestingKnobs).ShouldFlushFrontier = func(rs jobspb.ResolvedSpan) bool {
+			return true
+		}
+	}))
 }
