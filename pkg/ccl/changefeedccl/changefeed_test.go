@@ -18,7 +18,9 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/fs"
 	"path"
+	"path/filepath"
 	"reflect"
 	"regexp"
 	"slices"
@@ -12772,4 +12774,64 @@ func TestCreateTableLevelChangefeedWithDBPrivilege(t *testing.T) {
 		})
 	}
 	cdcTest(t, testFn, feedTestEnterpriseSinks)
+}
+
+func TestCloudStorageFeedOrderingIssue(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	testFn := func(t *testing.T, s TestServer, f cdctest.TestFeedFactory) {
+		sqlDB := sqlutils.MakeSQLRunner(s.DB)
+		sqlDB.Exec(t, `CREATE TABLE foo (id INT PRIMARY KEY);`)
+		sqlDB.Exec(t, `INSERT INTO foo VALUES (1);`)
+		feed := feed(t, f, `CREATE CHANGEFEED FOR foo WITH file_size='1'`)
+		defer closeFeed(t, feed)
+		ef := feed.(cdctest.EnterpriseTestFeed)
+		assertPayloads(t, feed, []string{
+			`foo: [1]->{"after": {"id": 1}}`,
+		})
+
+		inserts := 0
+		for start := timeutil.Now(); timeutil.Since(start) < 30*time.Second; {
+			switch rand.Intn(3) {
+			case 0:
+				inserts++
+				sqlDB.Exec(t, `INSERT INTO foo VALUES (select max(id) + 1 from foo);`)
+			case 1:
+				ef.Pause()
+			case 2:
+				ef.Resume()
+			}
+		}
+
+		ef.Pause()
+
+		validator := cdctest.NewOrderValidator("foo")
+		filepath.Walk(feed.(*cloudFeed).dir, func(path string, d os.FileInfo, err error) error {
+			require.NoError(t, err)
+			require.False(t, strings.HasSuffix(path, `.tmp`), "tmp file found")
+			if d.IsDir() {
+				return nil
+			}
+
+			// read file
+			contents, err := os.ReadFile(path)
+			require.NoError(t, err)
+
+			var row struct {
+				After struct {
+					ID int `json:"id"`
+				} `json:"after"`
+				Key     string `json:"key"`
+				Topic   string `json:"topic"`
+				Updated string `json:"updated"`
+			}
+			require.NoError(t, gojson.Unmarshal(contents, &row))
+
+			updated := parseTimeToHLC(t, row.Updated)
+			require.NoError(t, validator.NoteRow(cloudFeedPartition, row.Key, row.Topic, updated, "foo"))
+			return nil
+		})
+	}
+	cdcTest(t, testFn, feedTestForceSink("cloudstorage"))
 }
