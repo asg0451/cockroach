@@ -12783,7 +12783,7 @@ func TestCloudStorageFeedOrderingIssue(t *testing.T) {
 		sqlDB := sqlutils.MakeSQLRunner(s.DB)
 		sqlDB.Exec(t, `CREATE TABLE foo (id INT PRIMARY KEY);`)
 		sqlDB.Exec(t, `INSERT INTO foo VALUES (1);`)
-		feed := feed(t, f, `CREATE CHANGEFEED FOR foo WITH file_size='1'`)
+		feed := feed(t, f, `CREATE CHANGEFEED FOR foo`, "file_size='1'")
 		defer closeFeed(t, feed)
 		ef := feed.(cdctest.EnterpriseTestFeed)
 		assertPayloads(t, feed, []string{
