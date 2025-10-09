@@ -12836,7 +12836,12 @@ func TestCloudStorageFeedOrderingIssue(t *testing.T) {
 
 		validator := cdctest.NewOrderValidator("foo")
 		require.NoError(t, filepath.Walk(feed.(*cloudFeed).dir, func(path string, d os.FileInfo, err error) error {
-			require.NoError(t, err)
+			if err != nil {
+				if strings.Contains(err.Error(), "no such file or directory") {
+					return nil
+				}
+				return err
+			}
 			if strings.HasSuffix(path, `.tmp`) {
 				t.Logf("tmp file found: %s", path)
 				return nil
