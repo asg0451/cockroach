@@ -12783,19 +12783,19 @@ func TestCloudStorageFeedOrderingIssue(t *testing.T) {
 		sqlDB := sqlutils.MakeSQLRunner(s.DB)
 		sqlDB.Exec(t, `CREATE TABLE foo (id INT PRIMARY KEY);`)
 		sqlDB.Exec(t, `INSERT INTO foo VALUES (1);`)
-		feed := feed(t, f, `CREATE CHANGEFEED FOR foo`)
+		feed := feed(t, f, `CREATE CHANGEFEED FOR foo with format=json, updated`)
 		defer closeFeed(t, feed)
 		ef := feed.(cdctest.EnterpriseTestFeed)
-		assertPayloads(t, feed, []string{
+		assertPayloadsStripTs(t, feed, []string{
 			`foo: [1]->{"after": {"id": 1}}`,
 		})
 
 		inserts := 0
-		for start := timeutil.Now(); timeutil.Since(start) < 30*time.Second; {
+		for start := timeutil.Now(); timeutil.Since(start) < 10*time.Second; {
 			switch rand.Intn(3) {
 			case 0:
 				inserts++
-				sqlDB.Exec(t, `INSERT INTO foo VALUES (select max(id) + 1 from foo);`)
+				sqlDB.Exec(t, `INSERT INTO foo VALUES ($1);`, inserts+2)
 			case 1:
 				ef.Pause()
 			case 2:
@@ -12806,10 +12806,13 @@ func TestCloudStorageFeedOrderingIssue(t *testing.T) {
 		ef.Pause()
 
 		validator := cdctest.NewOrderValidator("foo")
-		filepath.Walk(feed.(*cloudFeed).dir, func(path string, d os.FileInfo, err error) error {
+		require.NoError(t, filepath.Walk(feed.(*cloudFeed).dir, func(path string, d os.FileInfo, err error) error {
 			require.NoError(t, err)
 			require.False(t, strings.HasSuffix(path, `.tmp`), "tmp file found")
 			if d.IsDir() {
+				return nil
+			}
+			if strings.Contains(d.Name(), "crdb_external_storage_location") {
 				return nil
 			}
 
@@ -12821,16 +12824,17 @@ func TestCloudStorageFeedOrderingIssue(t *testing.T) {
 				After struct {
 					ID int `json:"id"`
 				} `json:"after"`
-				Key     string `json:"key"`
-				Topic   string `json:"topic"`
-				Updated string `json:"updated"`
+				Key     gojson.RawMessage `json:"key"`
+				Topic   string            `json:"topic"`
+				Updated string            `json:"updated"`
 			}
 			require.NoError(t, gojson.Unmarshal(contents, &row))
 
 			updated := parseTimeToHLC(t, row.Updated)
-			require.NoError(t, validator.NoteRow(cloudFeedPartition, row.Key, row.Topic, updated, "foo"))
+			require.NoError(t, validator.NoteRow(cloudFeedPartition, string(row.Key), row.Topic, updated, "foo"))
 			return nil
-		})
+		}))
+		require.Empty(t, validator.Failures())
 	}
 	cdcTest(t, testFn, feedTestForceSink("cloudstorage"))
 }
