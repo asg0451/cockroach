@@ -114,6 +114,28 @@ message ChangeFrontierSpec {
 message IcebergFileClosed {
   optional string path = 1 [(gogoproto.nullable) = false];
   optional util.hlc.Timestamp epoch_hlc = 2 [(gogoproto.nullable) = false];
+  // Fully qualified table name (db.schema.table) for which this file was written.
+  optional string table_fqn = 3 [(gogoproto.nullable) = false];
+  // Worker/shard identifier (changefeed SQL instance ID).
+  optional int32 worker_id = 4 [(gogoproto.nullable) = false];
+  // CRDB table schema descriptor version that produced this file.
+  optional uint32 schema_id = 5 [(gogoproto.nullable) = false];
+  // Iceberg partition spec id in use when writing this file.
+  optional int32 spec_id = 6 [(gogoproto.nullable) = false];
+  // Kind of file written: data vs equality delete.
+  enum Kind {
+    DATA = 0;
+    EQUALITY_DELETE = 1;
+  }
+  optional Kind kind = 7 [(gogoproto.nullable) = false];
+  // Number of records contained in the file.
+  optional int64 record_count = 8 [(gogoproto.nullable) = false];
+  // Raw file size in bytes.
+  optional int64 file_size_bytes = 9 [(gogoproto.nullable) = false];
+  // Partition values encoded as strings per Iceberg spec transforms.
+  map<string, string> partition = 10;
+  // SHA-256 hash over canonical json of {path,size,record_count,partition}.
+  optional bytes file_hash = 11 [(gogoproto.nullable) = false];
 }
 
 // ChangefeedProgressConfig is the configuration for the changefeed's progress tracking.

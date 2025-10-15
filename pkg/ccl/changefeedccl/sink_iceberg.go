@@ -27,8 +27,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
-
-	// no proto encoding for file-closed stub in MVP; keep payload opaque bytes
 	"github.com/cockroachdb/cockroach/pkg/util/parquet"
 	"github.com/cockroachdb/crlib/crtime"
 	"github.com/cockroachdb/errors"
@@ -57,6 +55,10 @@ type icebergSink struct {
 	cfg         icebergConfig
 	targetMaxSz int64
 
+	// optional partition spec (from config for MVP)
+	spec   PartitionSpec
+	specID int32
+
 	// per-topic keyed open file state
 	files *btreemap.BTreeMap[icebergFileKey, *icebergOpenFile]
 
@@ -68,6 +70,9 @@ type icebergFileKey struct {
 	tableID  descpb.ID
 	familyID descpb.FamilyID
 	schemaID uint32
+	// partKey encodes partition name=value pairs in a stable order for the file
+	// series. Empty if no partition spec is configured.
+	partKey string
 }
 
 func icebergKeyCmp(a, b icebergFileKey) int {
@@ -77,7 +82,10 @@ func icebergKeyCmp(a, b icebergFileKey) int {
 	if c := cmp.Compare(a.familyID, b.familyID); c != 0 {
 		return c
 	}
-	return cmp.Compare(a.schemaID, b.schemaID)
+	if c := cmp.Compare(a.schemaID, b.schemaID); c != 0 {
+		return c
+	}
+	return cmp.Compare(a.partKey, b.partKey)
 }
 
 type icebergOpenFile struct {
@@ -86,9 +94,12 @@ type icebergOpenFile struct {
 	schemaID   uint32
 	created    crtime.Mono
 	oldestMVCC hlc.Timestamp
+	latestMVCC hlc.Timestamp
 	buf        bytes.Buffer
 	writer     *parquetWriter
 	numRows    int
+	// partition holds evaluated partition values for this open file.
+	partition map[string]string
 }
 
 func (s *icebergSink) getConcreteType() sinkType { return sinkTypeIceberg }
@@ -118,17 +129,15 @@ func (s *icebergSink) Flush(ctx context.Context) error {
 	if s.files == nil {
 		return nil
 	}
-	// Use a synthetic high timestamp to force finalization of all files.
-	high := hlc.MaxTimestamp
+	// Only flush Parquet buffered data; do not finalize or upload.
 	vals := s.files.Ascend(btreemap.Min[icebergFileKey](), btreemap.Max[icebergFileKey]())
 	for _, of := range vals {
-		if of.numRows == 0 {
+		if of.numRows == 0 || of.writer == nil {
 			continue
 		}
-		if err := s.finalizeAndUpload(ctx, of, high); err != nil {
+		if err := of.writer.flush(); err != nil {
 			return err
 		}
-		s.files.Delete(of.key)
 	}
 	return nil
 }
@@ -136,6 +145,12 @@ func (s *icebergSink) Flush(ctx context.Context) error {
 // FileClosedProvider allows the aggregator to register a callback for file-closed events.
 type FileClosedProvider interface {
 	RegisterFileClosedHandler(func([]byte))
+}
+
+// ResolvedFence allows the aggregator to request that the sink finalize all
+// files up to the provided resolved timestamp before emitting the resolved.
+type ResolvedFence interface {
+	FinalizeFilesUpTo(context.Context, hlc.Timestamp) error
 }
 
 // RegisterFileClosedHandler implements FileClosedProvider.
@@ -164,6 +179,9 @@ type icebergJSONConfig struct {
 	ClientID     string `json:"client_id"`
 	ClientSecret string `json:"client_secret"`
 	Scope        string `json:"scope"`
+	// Optional Iceberg partition spec and id
+	Spec   json.RawMessage `json:"spec"`
+	SpecID int             `json:"spec_id"`
 }
 
 func parseIcebergConfig(
@@ -270,6 +288,20 @@ func makeIcebergSink(
 		targetMaxSz: 16 << 20, // 16MB
 		files:       btreemap.New[icebergFileKey, *icebergOpenFile](8, icebergKeyCmp),
 	}
+	// Parse optional partition spec from options JSON.
+	if opts.JSONConfig != `` {
+		var jc icebergJSONConfig
+		// Best-effort parse; ignore errors here since config may not include spec.
+		_ = json.Unmarshal([]byte(opts.JSONConfig), &jc)
+		if len(jc.Spec) > 0 {
+			spec, specID, err := parsePartitionSpecJSON([]byte(jc.Spec), jc.SpecID)
+			if err != nil {
+				return nil, err
+			}
+			s.spec = spec
+			s.specID = int32(specID)
+		}
+	}
 	return s, nil
 }
 
@@ -286,10 +318,33 @@ func (s *icebergSink) EncodeAndEmitRow(
 	if s.files == nil {
 		return errors.New("cannot EncodeAndEmitRow on a closed sink")
 	}
-	key := icebergFileKey{tableID: topic.GetTopicIdentifier().TableID, familyID: topic.GetTopicIdentifier().FamilyID, schemaID: uint32(topic.GetVersion())}
+	// Evaluate partition values if a spec is configured.
+	var parts map[string]string
+	var partKey string
+	if len(s.spec.Fields) > 0 {
+		p, err := EvaluatePartition(updatedRow, s.spec)
+		if err != nil {
+			return err
+		}
+		parts = p
+		// Build a stable partKey of name=value pairs in spec order.
+		b := strings.Builder{}
+		for i, f := range s.spec.Fields {
+			if v, ok := parts[f.Name]; ok {
+				if i > 0 {
+					b.WriteByte('/')
+				}
+				b.WriteString(f.Name)
+				b.WriteByte('=')
+				b.WriteString(v)
+			}
+		}
+		partKey = b.String()
+	}
+	key := icebergFileKey{tableID: topic.GetTopicIdentifier().TableID, familyID: topic.GetTopicIdentifier().FamilyID, schemaID: uint32(topic.GetVersion()), partKey: partKey}
 	_, of, _ := s.files.Get(key)
 	if of == nil {
-		of = &icebergOpenFile{key: key, topic: topic, schemaID: key.schemaID, created: crtime.NowMono(), oldestMVCC: mvcc}
+		of = &icebergOpenFile{key: key, topic: topic, schemaID: key.schemaID, created: crtime.NowMono(), oldestMVCC: mvcc, latestMVCC: mvcc, partition: parts}
 		pw, err := newParquetWriterFromRow(updatedRow, &of.buf, encodingOpts, parquet.WithCompressionCodec(parquet.CompressionZSTD))
 		if err != nil {
 			return err
@@ -299,6 +354,9 @@ func (s *icebergSink) EncodeAndEmitRow(
 	}
 	if of.oldestMVCC.IsEmpty() || mvcc.Less(of.oldestMVCC) {
 		of.oldestMVCC = mvcc
+	}
+	if of.latestMVCC.Less(mvcc) {
+		of.latestMVCC = mvcc
 	}
 	if err := of.writer.addData(updatedRow, prevRow, updated, mvcc); err != nil {
 		return err
@@ -313,7 +371,7 @@ func (s *icebergSink) EncodeAndEmitRow(
 			return err
 		}
 		// Replace with a fresh file for the same key
-		newOf := &icebergOpenFile{key: key, topic: topic, schemaID: key.schemaID, created: crtime.NowMono(), oldestMVCC: hlc.MaxTimestamp}
+		newOf := &icebergOpenFile{key: key, topic: topic, schemaID: key.schemaID, created: crtime.NowMono(), oldestMVCC: hlc.MaxTimestamp, latestMVCC: hlc.MinTimestamp, partition: parts}
 		pw, err := newParquetWriterFromRow(updatedRow, &newOf.buf, encodingOpts, parquet.WithCompressionCodec(parquet.CompressionZSTD))
 		if err != nil {
 			return err
@@ -330,23 +388,63 @@ func (s *icebergSink) finalizeAndUpload(ctx context.Context, of *icebergOpenFile
 			return err
 		}
 	}
-	// Build deterministic path: <warehouse>/<ns>/<table>/crdb_job=<job_id>/epoch=<R>/shard=<worker_id>/data-<seq>.parquet
+	// Build deterministic path: <warehouse>/<ns>/<table>/crdb_job=<job_id>/<partition...>/epoch=<R>/shard=<worker_id>/data-<seq>.parquet
 	seq := atomic.AddUint64(&s.seq, 1)
 	epochPart := fmt.Sprintf("epoch=%d-%d", epoch.WallTime, epoch.Logical)
 	shardPart := fmt.Sprintf("shard=%d", s.nodeID)
 	fileName := fmt.Sprintf("data-%08x.parquet", seq)
-	dest := filepath.Join(s.cfg.namespace, s.cfg.table, fmt.Sprintf("crdb_job=%d", s.jobID), epochPart, shardPart, fileName)
+	var pathElems []string
+	pathElems = append(pathElems, s.cfg.namespace, s.cfg.table, fmt.Sprintf("crdb_job=%d", s.jobID))
+	if len(s.spec.Fields) > 0 && len(of.partition) > 0 {
+		for _, f := range s.spec.Fields {
+			if v, ok := of.partition[f.Name]; ok {
+				pathElems = append(pathElems, fmt.Sprintf("%s=%s", f.Name, v))
+			}
+		}
+	}
+	pathElems = append(pathElems, epochPart, shardPart, fileName)
+	dest := filepath.Join(pathElems...)
 	// Write file to warehouse via ExternalStorage
 	if err := cloud.WriteFile(ctx, s.es, dest, bytes.NewReader(of.buf.Bytes())); err != nil {
 		return err
 	}
-	// Emit FileClosed bytes as an opaque payload for now (scaffolding)
-	payload := []byte(fmt.Sprintf("path=%s;epoch=%d-%d", dest, epoch.WallTime, epoch.Logical))
+	// Emit FileClosed as protobuf (no metrics yet). Delay proto dependency by
+	// encoding payload via helper to avoid requiring generated code in this file.
+	payload := marshalFileClosed(dest, epoch, fmt.Sprintf("%s.%s", s.cfg.namespace, s.cfg.table), int32(s.nodeID), of.schemaID, s.specID, int64(of.numRows), int64(of.buf.Len()), of.partition)
 	for _, h := range s.fileClosedHandlers {
 		h(payload)
 	}
 	// record metrics and mark as finalized
 	s.m.recordEmittedBatch(of.created, of.numRows, of.oldestMVCC, of.buf.Len(), sinkDoesNotCompress)
 	of.numRows = 0
+	return nil
+}
+
+// FinalizeFilesUpTo implements ResolvedFence. It finalizes open files whose latest
+// MVCC is <= resolved and emits FileClosed for them. Remaining files stay open.
+func (s *icebergSink) FinalizeFilesUpTo(ctx context.Context, resolved hlc.Timestamp) error {
+	if s.files == nil {
+		return nil
+	}
+	vals := s.files.Ascend(btreemap.Min[icebergFileKey](), btreemap.Max[icebergFileKey]())
+	for _, of := range vals {
+		if of.numRows == 0 {
+			continue
+		}
+		if of.latestMVCC.IsEmpty() || resolved.IsEmpty() {
+			continue
+		}
+		if of.latestMVCC.LessEq(resolved) {
+			if of.writer != nil {
+				if err := of.writer.flush(); err != nil {
+					return err
+				}
+			}
+			if err := s.finalizeAndUpload(ctx, of, resolved); err != nil {
+				return err
+			}
+			s.files.Delete(of.key)
+		}
+	}
 	return nil
 }

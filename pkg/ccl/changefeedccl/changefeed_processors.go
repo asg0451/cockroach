@@ -994,6 +994,16 @@ func (ca *changeAggregator) flushFrontier(ctx context.Context) error {
 		return err
 	}
 
+	// In Iceberg mode, ensure files up to the current frontier are finalized
+	// before emitting resolved so that FileClosed entries precede the resolved fence.
+	if rf, ok := ca.sink.(interface {
+		FinalizeFilesUpTo(context.Context, hlc.Timestamp) error
+	}); ok {
+		if err := rf.FinalizeFilesUpTo(ctx, ca.frontier.Frontier()); err != nil {
+			return err
+		}
+	}
+
 	// Iterate frontier spans and build a list of spans to emit.
 	batch := jobspb.ResolvedSpans{
 		ResolvedSpans: slices.Collect(ca.frontier.All()),
