@@ -6,16 +6,31 @@
 package changefeedccl
 
 import (
+	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/url"
+	"path/filepath"
 	"strings"
+	"sync/atomic"
 
+	"github.com/RaduBerinde/btreemap"
+	"github.com/cockroachdb/cockroach/pkg/base"
+	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/cdcevent"
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/changefeedbase"
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/kvevent"
-
-	// execinfrapb only used for message definition; aggregator consumes bytes.
+	"github.com/cockroachdb/cockroach/pkg/cloud"
+	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
+	"github.com/cockroachdb/cockroach/pkg/security/username"
+	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
+
+	// no proto encoding for file-closed stub in MVP; keep payload opaque bytes
+	"github.com/cockroachdb/cockroach/pkg/util/parquet"
+	"github.com/cockroachdb/crlib/crtime"
 	"github.com/cockroachdb/errors"
 )
 
@@ -30,12 +45,57 @@ type icebergSink struct {
 	m metricsRecorder
 	// optional callback to notify aggregator on file close (Iceberg mode)
 	fileClosedHandlers []func([]byte)
+
+	// storage and context
+	es       cloud.ExternalStorage
+	settings *cluster.Settings
+	oracle   timestampLowerBoundOracle
+	jobID    jobspb.JobID
+	nodeID   base.SQLInstanceID
+
+	// config
+	cfg         icebergConfig
+	targetMaxSz int64
+
+	// per-topic keyed open file state
+	files *btreemap.BTreeMap[icebergFileKey, *icebergOpenFile]
+
+	// sequence for data file naming
+	seq uint64
+}
+
+type icebergFileKey struct {
+	tableID  descpb.ID
+	familyID descpb.FamilyID
+	schemaID uint32
+}
+
+func icebergKeyCmp(a, b icebergFileKey) int {
+	if c := cmp.Compare(a.tableID, b.tableID); c != 0 {
+		return c
+	}
+	if c := cmp.Compare(a.familyID, b.familyID); c != 0 {
+		return c
+	}
+	return cmp.Compare(a.schemaID, b.schemaID)
+}
+
+type icebergOpenFile struct {
+	key        icebergFileKey
+	topic      TopicDescriptor
+	schemaID   uint32
+	created    crtime.Mono
+	oldestMVCC hlc.Timestamp
+	buf        bytes.Buffer
+	writer     *parquetWriter
+	numRows    int
 }
 
 func (s *icebergSink) getConcreteType() sinkType { return sinkTypeIceberg }
 func (s *icebergSink) Dial() error               { return nil }
 func (s *icebergSink) Close() error              { return nil }
 
+// For parquet, EncodeAndEmitRow is used via SinkWithEncoder; EmitRow should not be called.
 func (s *icebergSink) EmitRow(
 	ctx context.Context,
 	topic TopicDescriptor,
@@ -44,9 +104,7 @@ func (s *icebergSink) EmitRow(
 	_ kvevent.Alloc,
 	_headers rowHeaders,
 ) error {
-	// TODO: implement iceberg writer
-	s.m.recordOneMessage()(mvcc, len(key)+len(value), sinkDoesNotCompress)
-	return nil
+	return errors.AssertionFailedf("EmitRow unimplemented by iceberg sink; parquet path uses EncodeAndEmitRow")
 }
 
 func (s *icebergSink) EmitResolvedTimestamp(ctx context.Context, _ Encoder, _ hlc.Timestamp) error {
@@ -55,7 +113,23 @@ func (s *icebergSink) EmitResolvedTimestamp(ctx context.Context, _ Encoder, _ hl
 }
 
 func (s *icebergSink) Flush(ctx context.Context) error {
-	s.m.recordFlushRequestCallback()()
+	done := s.m.recordFlushRequestCallback()
+	defer done()
+	if s.files == nil {
+		return nil
+	}
+	// Use a synthetic high timestamp to force finalization of all files.
+	high := hlc.MaxTimestamp
+	vals := s.files.Ascend(btreemap.Min[icebergFileKey](), btreemap.Max[icebergFileKey]())
+	for _, of := range vals {
+		if of.numRows == 0 {
+			continue
+		}
+		if err := s.finalizeAndUpload(ctx, of, high); err != nil {
+			return err
+		}
+		s.files.Delete(of.key)
+	}
 	return nil
 }
 
@@ -159,8 +233,14 @@ func parseIcebergConfig(
 // makeIcebergSink constructs a minimal iceberg sink from the sink URL.
 // URL structure is expected to be: iceberg://<rest-endpoint>/<namespace>/<table>
 func makeIcebergSink(
-	_ context.Context,
+	ctx context.Context,
 	u *changefeedbase.SinkURL,
+	srcID base.SQLInstanceID,
+	settings *cluster.Settings,
+	oracle timestampLowerBoundOracle,
+	makeExternalStorageFromURI cloud.ExternalStorageFromURIFactory,
+	user username.SQLUsername,
+	jobID jobspb.JobID,
 	_ changefeedbase.Targets,
 	enc changefeedbase.EncodingOptions,
 	mb metricsRecorderBuilder,
@@ -169,9 +249,104 @@ func makeIcebergSink(
 	if enc.Format != changefeedbase.OptFormatParquet {
 		return nil, errors.Newf("%s sink requires %s=parquet", changefeedbase.SinkSchemeIceberg, changefeedbase.OptFormat)
 	}
-	if _, err := parseIcebergConfig(u, opts.JSONConfig, opts.EqualityDeleteBy); err != nil {
+	cfg, err := parseIcebergConfig(u, opts.JSONConfig, opts.EqualityDeleteBy)
+	if err != nil {
 		return nil, err
 	}
-	m := mb(requiresResourceAccounting)
-	return &icebergSink{m: m}, nil
+	// Open ExternalStorage for the warehouse URI.
+	es, err := makeExternalStorageFromURI(ctx, cfg.warehouseURI, user, cloud.WithIOAccountingInterceptor(nil), cloud.WithClientName("cdc"))
+	if err != nil {
+		return nil, err
+	}
+	m := mb(es.RequiresExternalIOAccounting())
+	s := &icebergSink{
+		m:           m,
+		es:          es,
+		settings:    settings,
+		oracle:      oracle,
+		jobID:       jobID,
+		nodeID:      srcID,
+		cfg:         cfg,
+		targetMaxSz: 16 << 20, // 16MB
+		files:       btreemap.New[icebergFileKey, *icebergOpenFile](8, icebergKeyCmp),
+	}
+	return s, nil
+}
+
+// EncodeAndEmitRow implements SinkWithEncoder for parquet path.
+func (s *icebergSink) EncodeAndEmitRow(
+	ctx context.Context,
+	updatedRow cdcevent.Row,
+	prevRow cdcevent.Row,
+	topic TopicDescriptor,
+	updated, mvcc hlc.Timestamp,
+	encodingOpts changefeedbase.EncodingOptions,
+	_ kvevent.Alloc,
+) error {
+	if s.files == nil {
+		return errors.New("cannot EncodeAndEmitRow on a closed sink")
+	}
+	key := icebergFileKey{tableID: topic.GetTopicIdentifier().TableID, familyID: topic.GetTopicIdentifier().FamilyID, schemaID: uint32(topic.GetVersion())}
+	_, of, _ := s.files.Get(key)
+	if of == nil {
+		of = &icebergOpenFile{key: key, topic: topic, schemaID: key.schemaID, created: crtime.NowMono(), oldestMVCC: mvcc}
+		pw, err := newParquetWriterFromRow(updatedRow, &of.buf, encodingOpts, parquet.WithCompressionCodec(parquet.CompressionZSTD))
+		if err != nil {
+			return err
+		}
+		of.writer = pw
+		s.files.ReplaceOrInsert(key, of)
+	}
+	if of.oldestMVCC.IsEmpty() || mvcc.Less(of.oldestMVCC) {
+		of.oldestMVCC = mvcc
+	}
+	if err := of.writer.addData(updatedRow, prevRow, updated, mvcc); err != nil {
+		return err
+	}
+	of.numRows++
+	// If buffered + written exceeds target, flush row group and finalize file.
+	if int64(of.buf.Len())+of.writer.estimatedBufferedBytes() > s.targetMaxSz {
+		if err := of.writer.flush(); err != nil {
+			return err
+		}
+		if err := s.finalizeAndUpload(ctx, of, updated); err != nil {
+			return err
+		}
+		// Replace with a fresh file for the same key
+		newOf := &icebergOpenFile{key: key, topic: topic, schemaID: key.schemaID, created: crtime.NowMono(), oldestMVCC: hlc.MaxTimestamp}
+		pw, err := newParquetWriterFromRow(updatedRow, &newOf.buf, encodingOpts, parquet.WithCompressionCodec(parquet.CompressionZSTD))
+		if err != nil {
+			return err
+		}
+		newOf.writer = pw
+		s.files.ReplaceOrInsert(key, newOf)
+	}
+	return nil
+}
+
+func (s *icebergSink) finalizeAndUpload(ctx context.Context, of *icebergOpenFile, epoch hlc.Timestamp) error {
+	if of.writer != nil {
+		if err := of.writer.close(); err != nil {
+			return err
+		}
+	}
+	// Build deterministic path: <warehouse>/<ns>/<table>/crdb_job=<job_id>/epoch=<R>/shard=<worker_id>/data-<seq>.parquet
+	seq := atomic.AddUint64(&s.seq, 1)
+	epochPart := fmt.Sprintf("epoch=%d-%d", epoch.WallTime, epoch.Logical)
+	shardPart := fmt.Sprintf("shard=%d", s.nodeID)
+	fileName := fmt.Sprintf("data-%08x.parquet", seq)
+	dest := filepath.Join(s.cfg.namespace, s.cfg.table, fmt.Sprintf("crdb_job=%d", s.jobID), epochPart, shardPart, fileName)
+	// Write file to warehouse via ExternalStorage
+	if err := cloud.WriteFile(ctx, s.es, dest, bytes.NewReader(of.buf.Bytes())); err != nil {
+		return err
+	}
+	// Emit FileClosed bytes as an opaque payload for now (scaffolding)
+	payload := []byte(fmt.Sprintf("path=%s;epoch=%d-%d", dest, epoch.WallTime, epoch.Logical))
+	for _, h := range s.fileClosedHandlers {
+		h(payload)
+	}
+	// record metrics and mark as finalized
+	s.m.recordEmittedBatch(of.created, of.numRows, of.oldestMVCC, of.buf.Len(), sinkDoesNotCompress)
+	of.numRows = 0
+	return nil
 }

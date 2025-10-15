@@ -318,7 +318,25 @@ func getSink(
 		case isIcebergSink(u):
 			return validateOptionsAndMakeSink(changefeedbase.IcebergValidOptions, func() (Sink, error) {
 				icebergOpts := opts.GetIcebergSinkOptions()
-				return makeIcebergSink(ctx, &changefeedbase.SinkURL{URL: u}, targets, encodingOpts, metricsBuilder, icebergOpts)
+				// Placeholder id for canary sink
+				var nodeID base.SQLInstanceID = 0
+				if serverCfg.NodeID != nil {
+					nodeID = serverCfg.NodeID.SQLInstanceID()
+				}
+				return makeIcebergSink(
+					ctx,
+					&changefeedbase.SinkURL{URL: u},
+					nodeID,
+					serverCfg.Settings,
+					timestampOracle,
+					serverCfg.ExternalStorageFromURI,
+					user,
+					jobID,
+					targets,
+					encodingOpts,
+					metricsBuilder,
+					icebergOpts,
+				)
 			})
 		case u.Scheme == changefeedbase.SinkSchemeExperimentalSQL:
 			return validateOptionsAndMakeSink(changefeedbase.SQLValidOptions, func() (Sink, error) {
