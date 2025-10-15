@@ -7,6 +7,7 @@ package changefeedccl
 
 import (
 	"context"
+	"encoding/json"
 	"net/url"
 	"strings"
 
@@ -68,7 +69,20 @@ type icebergConfig struct {
 	scope        string
 }
 
-func parseIcebergConfig(u *changefeedbase.SinkURL) (icebergConfig, error) {
+type icebergJSONConfig struct {
+	Warehouse    string `json:"warehouse"`
+	Auth         string `json:"auth"`
+	Token        string `json:"token"`
+	ClientID     string `json:"client_id"`
+	ClientSecret string `json:"client_secret"`
+	Scope        string `json:"scope"`
+}
+
+func parseIcebergConfig(
+	u *changefeedbase.SinkURL,
+	jsonStr changefeedbase.SinkSpecificJSONConfig,
+	equalityDeleteBy string,
+) (icebergConfig, error) {
 	cfg := icebergConfig{}
 	if u.Host == "" {
 		return cfg, errors.Newf("missing REST endpoint host for scheme %s", changefeedbase.SinkSchemeIceberg)
@@ -87,19 +101,24 @@ func parseIcebergConfig(u *changefeedbase.SinkURL) (icebergConfig, error) {
 	cfg.namespace = parts[len(parts)-2]
 	cfg.table = parts[len(parts)-1]
 
-	// Required query params
-	cfg.warehouseURI = u.ConsumeParam("warehouse")
+	// Parse JSON config for required/optional settings.
+	var jc icebergJSONConfig
+	if jsonStr != `` {
+		if err := json.Unmarshal([]byte(jsonStr), &jc); err != nil {
+			return cfg, errors.Wrap(err, "invalid iceberg_sink_config json")
+		}
+	}
+	cfg.warehouseURI = jc.Warehouse
 	if cfg.warehouseURI == "" {
-		return cfg, errors.Newf("scheme %s requires parameter %s", changefeedbase.SinkSchemeIceberg, "warehouse")
+		return cfg, errors.Newf("%s requires %s in %s", changefeedbase.SinkSchemeIceberg, "warehouse", changefeedbase.OptIcebergSinkConfig)
 	}
 
-	// Optional params
-	cfg.equalityDeleteBy = u.ConsumeParam("equality_delete_by")
-	cfg.authKind = strings.ToLower(u.ConsumeParam("auth"))
-	cfg.token = u.ConsumeParam("token")
-	cfg.clientID = u.ConsumeParam("client_id")
-	cfg.clientSecret = u.ConsumeParam("client_secret")
-	cfg.scope = u.ConsumeParam("scope")
+	cfg.equalityDeleteBy = equalityDeleteBy
+	cfg.authKind = strings.ToLower(jc.Auth)
+	cfg.token = jc.Token
+	cfg.clientID = jc.ClientID
+	cfg.clientSecret = jc.ClientSecret
+	cfg.scope = jc.Scope
 
 	switch cfg.authKind {
 	case "", "none":
@@ -116,26 +135,27 @@ func parseIcebergConfig(u *changefeedbase.SinkURL) (icebergConfig, error) {
 		return cfg, errors.Newf("unsupported auth kind %q; use none|bearer|oauth", cfg.authKind)
 	}
 
-	// Validate no unknown params remain (defensive; helps catch typos)
+	// Validate no unknown query params are supplied (use JSON instead)
 	if rem := u.RemainingQueryParams(); len(rem) > 0 {
-		return cfg, errors.Newf("invalid query parameters %v for scheme %s", rem, changefeedbase.SinkSchemeIceberg)
+		return cfg, errors.Newf("invalid query parameters %v for scheme %s; use %s instead", rem, changefeedbase.SinkSchemeIceberg, changefeedbase.OptIcebergSinkConfig)
 	}
 	return cfg, nil
 }
 
 // makeIcebergSink constructs a minimal iceberg sink from the sink URL.
-// URL structure is expected to be: iceberg://<rest-endpoint>/<namespace>/<table>?warehouse=...&...
+// URL structure is expected to be: iceberg://<rest-endpoint>/<namespace>/<table>
 func makeIcebergSink(
 	_ context.Context,
 	u *changefeedbase.SinkURL,
 	_ changefeedbase.Targets,
 	enc changefeedbase.EncodingOptions,
 	mb metricsRecorderBuilder,
+	opts changefeedbase.IcebergSinkOptions,
 ) (Sink, error) {
 	if enc.Format != changefeedbase.OptFormatParquet {
 		return nil, errors.Newf("%s sink requires %s=parquet", changefeedbase.SinkSchemeIceberg, changefeedbase.OptFormat)
 	}
-	if _, err := parseIcebergConfig(u); err != nil {
+	if _, err := parseIcebergConfig(u, opts.JSONConfig, opts.EqualityDeleteBy); err != nil {
 		return nil, err
 	}
 	m := mb(requiresResourceAccounting)

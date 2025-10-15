@@ -317,7 +317,8 @@ func getSink(
 			})
 		case isIcebergSink(u):
 			return validateOptionsAndMakeSink(changefeedbase.IcebergValidOptions, func() (Sink, error) {
-				return makeIcebergSink(ctx, &changefeedbase.SinkURL{URL: u}, targets, encodingOpts, metricsBuilder)
+				icebergOpts := opts.GetIcebergSinkOptions()
+				return makeIcebergSink(ctx, &changefeedbase.SinkURL{URL: u}, targets, encodingOpts, metricsBuilder, icebergOpts)
 			})
 		case u.Scheme == changefeedbase.SinkSchemeExperimentalSQL:
 			return validateOptionsAndMakeSink(changefeedbase.SQLValidOptions, func() (Sink, error) {

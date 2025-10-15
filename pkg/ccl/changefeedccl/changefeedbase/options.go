@@ -116,6 +116,8 @@ const (
 	OptLaggingRangesPollingInterval       = `lagging_ranges_polling_interval`
 	OptIgnoreDisableChangefeedReplication = `ignore_disable_changefeed_replication`
 	OptEncodeJSONValueNullAsObject        = `encode_json_value_null_as_object`
+	// Sink-specific JSON configs
+	OptIcebergSinkConfig = `iceberg_sink_config`
 	// TODO(#142273): look into whether we want to add headers to pub/sub, and other
 	// sinks as well (eg cloudstorage, webhook, ..). Currently it's kafka-only.
 	OptHeadersJSONColumnName = `headers_json_column_name`
@@ -408,6 +410,7 @@ var ChangefeedOptionExpectValues = map[string]OptionPermittedValues{
 	OptKafkaSinkConfig:                    jsonOption,
 	OptPubsubSinkConfig:                   jsonOption,
 	OptWebhookSinkConfig:                  jsonOption,
+	OptIcebergSinkConfig:                  jsonOption,
 	OptWebhookAuthHeader:                  stringOption,
 	OptWebhookClientTimeout:               durationOption,
 	OptOnError:                            enum("pause", "fail"),
@@ -456,7 +459,7 @@ var PubsubValidOptions = makeStringSet(OptPubsubSinkConfig)
 
 // IcebergValidOptions is options exclusive to the iceberg sink. This will be
 // extended as the sink matures.
-var IcebergValidOptions = makeStringSet(OptEqualityDeleteBy)
+var IcebergValidOptions = makeStringSet(OptEqualityDeleteBy, OptIcebergSinkConfig)
 
 // ExternalConnectionValidOptions is options exclusive to the external
 // connection sink.
@@ -1136,6 +1139,22 @@ func (s StatementOptions) GetKafkaSinkOptions() (KafkaSinkOptions, error) {
 // by the pubsub sink.
 func (s StatementOptions) GetPubsubConfigJSON() SinkSpecificJSONConfig {
 	return s.getJSONValue(OptPubsubSinkConfig)
+}
+
+// IcebergSinkOptions are passed in WITH args but
+// are specific to the iceberg sink.
+type IcebergSinkOptions struct {
+	JSONConfig       SinkSpecificJSONConfig
+	EqualityDeleteBy string
+}
+
+// GetIcebergSinkOptions includes arbitrary json to be interpreted
+// by the iceberg sink and statement-level equality delete columns.
+func (s StatementOptions) GetIcebergSinkOptions() IcebergSinkOptions {
+	return IcebergSinkOptions{
+		JSONConfig:       s.getJSONValue(OptIcebergSinkConfig),
+		EqualityDeleteBy: s.m[OptEqualityDeleteBy],
+	}
 }
 
 // GetResolvedTimestampInterval gets the best-effort interval at which resolved timestamps
