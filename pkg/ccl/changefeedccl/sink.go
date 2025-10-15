@@ -496,6 +496,7 @@ func (s *bufferSink) EmitRow(
 		{Datum: s.getTopicDatum(topic)},
 		{Datum: s.alloc.NewDBytes(tree.DBytes(key))},   // key
 		{Datum: s.alloc.NewDBytes(tree.DBytes(value))}, // value
+		{Datum: tree.DNull},                            // iceberg file-closed (unused for sinkless)
 	})
 	return nil
 }
@@ -520,6 +521,7 @@ func (s *bufferSink) EmitResolvedTimestamp(
 		{Datum: tree.DNull}, // topic
 		{Datum: tree.DNull}, // key
 		{Datum: s.alloc.NewDBytes(tree.DBytes(payload))}, // value
+		{Datum: tree.DNull}, // iceberg file-closed (unused for sinkless)
 	})
 	return nil
 }

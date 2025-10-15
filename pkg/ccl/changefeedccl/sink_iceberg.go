@@ -13,6 +13,8 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/changefeedbase"
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/kvevent"
+
+	// execinfrapb only used for message definition; aggregator consumes bytes.
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/errors"
 )
@@ -26,6 +28,8 @@ func isIcebergSink(u *url.URL) bool {
 // end-to-end plumbing while the full sink is implemented.
 type icebergSink struct {
 	m metricsRecorder
+	// optional callback to notify aggregator on file close (Iceberg mode)
+	fileClosedHandlers []func([]byte)
 }
 
 func (s *icebergSink) getConcreteType() sinkType { return sinkTypeIceberg }
@@ -53,6 +57,16 @@ func (s *icebergSink) EmitResolvedTimestamp(ctx context.Context, _ Encoder, _ hl
 func (s *icebergSink) Flush(ctx context.Context) error {
 	s.m.recordFlushRequestCallback()()
 	return nil
+}
+
+// FileClosedProvider allows the aggregator to register a callback for file-closed events.
+type FileClosedProvider interface {
+	RegisterFileClosedHandler(func([]byte))
+}
+
+// RegisterFileClosedHandler implements FileClosedProvider.
+func (s *icebergSink) RegisterFileClosedHandler(h func([]byte)) {
+	s.fileClosedHandlers = append(s.fileClosedHandlers, h)
 }
 
 type icebergConfig struct {

@@ -108,6 +108,14 @@ message ChangeFrontierSpec {
   repeated cockroach.sql.jobs.jobspb.ResolvedSpan resolved_spans = 8 [(gogoproto.nullable) = false];
 }
 
+// IcebergFileClosed is an in-band message emitted by changefeed aggregators in
+// Iceberg mode to signal that a worker has finished writing a data/delete file
+// for an epoch. This scaffolding message will be extended in later steps.
+message IcebergFileClosed {
+  optional string path = 1 [(gogoproto.nullable) = false];
+  optional util.hlc.Timestamp epoch_hlc = 2 [(gogoproto.nullable) = false];
+}
+
 // ChangefeedProgressConfig is the configuration for the changefeed's progress tracking.
 message ChangefeedProgressConfig {
   // PerTableTracking configures whether the changefeed should track

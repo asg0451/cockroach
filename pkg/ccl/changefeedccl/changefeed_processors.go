@@ -443,6 +443,19 @@ func (ca *changeAggregator) Start(ctx context.Context) {
 		ca.changedRowBuf = &b.buf
 	}
 
+	// In Iceberg mode, register a handler on the sink for file-closed events.
+	if provider, ok := ca.sink.(interface{ RegisterFileClosedHandler(func([]byte)) }); ok {
+		provider.RegisterFileClosedHandler(func(b []byte) {
+			ca.resolvedSpanBuf.Push(rowenc.EncDatumRow{
+				rowenc.EncDatum{Datum: tree.DNull},
+				rowenc.EncDatum{Datum: tree.DNull},
+				rowenc.EncDatum{Datum: tree.DNull},
+				rowenc.EncDatum{Datum: tree.DNull},
+				rowenc.EncDatum{Datum: tree.NewDBytes(tree.DBytes(b))},
+			})
+		})
+	}
+
 	// If the initial scan was disabled the highwater would've already been forwarded
 	needsInitialScan := ca.frontier.Frontier().IsEmpty()
 
@@ -1007,6 +1020,7 @@ func (ca *changeAggregator) emitResolved(batch jobspb.ResolvedSpans) error {
 		rowenc.EncDatum{Datum: tree.DNull}, // topic
 		rowenc.EncDatum{Datum: tree.DNull}, // key
 		rowenc.EncDatum{Datum: tree.DNull}, // value
+		rowenc.EncDatum{Datum: tree.DNull}, // iceberg file-closed
 	})
 	ca.metrics.ResolvedMessages.Inc(1)
 
@@ -1107,6 +1121,11 @@ type changeFrontier struct {
 	usageWgCancel context.CancelFunc
 
 	targets changefeedbase.Targets
+
+	// iceberg coordinator stub (initialized when sink is iceberg)
+	// In later steps, this will buffer per (table, epoch) and coordinate commits.
+	// For now, this struct remains unused.
+	// iceberg *icebergCoordinator
 }
 
 const (
@@ -1694,6 +1713,16 @@ func (cf *changeFrontier) Next() (rowenc.EncDatumRow, *execinfrapb.ProducerMetad
 			break
 		}
 
+		// File-closed column (col 4) takes precedence if present.
+		if len(row) >= 5 && !row[4].IsNull() {
+			if err := cf.noteFileClosed(cf.Ctx(), row[4]); err != nil {
+				log.Changefeed.Warningf(cf.Ctx(), "moving to draining after error while processing file-closed: %v", err)
+				cf.MoveToDraining(err)
+				break
+			}
+			continue
+		}
+
 		if row[0].IsNull() {
 			// In changefeeds with a sink, this will never happen. But in the
 			// core changefeed, which returns changed rows directly via pgwire,
@@ -1756,6 +1785,31 @@ func (cf *changeFrontier) noteAggregatorProgress(ctx context.Context, d rowenc.E
 
 	cf.updateProgressSkewMetrics()
 
+	return nil
+}
+
+func (cf *changeFrontier) noteFileClosed(ctx context.Context, d rowenc.EncDatum) error {
+	ctx, sp := tracing.ChildSpan(ctx, "changefeed.frontier.note_file_closed")
+	defer sp.Finish()
+
+	if err := d.EnsureDecoded(changefeedResultTypes[4], &cf.a); err != nil {
+		return err
+	}
+	raw, ok := d.Datum.(*tree.DBytes)
+	if !ok {
+		return errors.AssertionFailedf(`unexpected datum type %T: %s`, d.Datum, d.Datum)
+	}
+	// Keep payload as opaque bytes for now; schema defined in proto.
+	// Later steps may unmarshal into execinfrapb.IcebergFileClosed if needed.
+	if len(*raw) == 0 {
+		return nil
+	}
+	// Validate it's a valid protobuf by attempting a generic unmarshal into Any-like struct not required.
+	// For scaffolding, accept bytes as-is.
+	if false {
+		_ = protoutil.Unmarshal
+	}
+	// Stub: in later steps, buffer per (table, epoch) and trigger manifest build on frontier advance.
 	return nil
 }
 
