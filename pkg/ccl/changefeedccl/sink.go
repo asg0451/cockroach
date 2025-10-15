@@ -57,6 +57,7 @@ const (
 	sinkTypeCloudstorage
 	sinkTypeSQL
 	sinkTypePulsar
+	sinkTypeIceberg
 )
 
 func (st sinkType) String() string {
@@ -77,6 +78,8 @@ func (st sinkType) String() string {
 		return `sql`
 	case sinkTypePulsar:
 		return `pulsar`
+	case sinkTypeIceberg:
+		return `iceberg`
 	default:
 		return `unknown`
 	}
@@ -311,6 +314,10 @@ func getSink(
 					ctx, &changefeedbase.SinkURL{URL: u}, nodeID, serverCfg.Settings, encodingOpts,
 					timestampOracle, serverCfg.ExternalStorageFromURI, user, metricsBuilder, testingKnobs,
 				)
+			})
+		case isIcebergSink(u):
+			return validateOptionsAndMakeSink(changefeedbase.IcebergValidOptions, func() (Sink, error) {
+				return makeIcebergSink(ctx, &changefeedbase.SinkURL{URL: u}, targets, encodingOpts, metricsBuilder)
 			})
 		case u.Scheme == changefeedbase.SinkSchemeExperimentalSQL:
 			return validateOptionsAndMakeSink(changefeedbase.SQLValidOptions, func() (Sink, error) {

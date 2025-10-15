@@ -3,6 +3,7 @@
 // Use of this software is governed by the CockroachDB Software License
 // included in the /LICENSE file.
 
+// Package changefeedbase contains shared types and option parsing for changefeeds.
 package changefeedbase
 
 import (
@@ -120,6 +121,11 @@ const (
 	OptHeadersJSONColumnName = `headers_json_column_name`
 	OptExtraHeaders          = `extra_headers`
 
+	// OptEqualityDeleteBy allows sink-specific configuration for expressing
+	// equality deletes (e.g., in Iceberg). The value is a comma-separated list
+	// of column names. Semantics to be enforced by the iceberg sink.
+	OptEqualityDeleteBy = `equality_delete_by`
+
 	OptVirtualColumnsOmitted VirtualColumnVisibility = `omitted`
 	OptVirtualColumnsNull    VirtualColumnVisibility = `null`
 
@@ -226,20 +232,22 @@ const (
 	SinkSchemeWebhookHTTPS          = `webhook-https`
 	SinkSchemePulsar                = `pulsar`
 	SinkSchemeExternalConnection    = `external`
-	SinkParamSASLEnabled            = `sasl_enabled`
-	SinkParamSASLHandshake          = `sasl_handshake`
-	SinkParamSASLUser               = `sasl_user`
-	SinkParamSASLPassword           = `sasl_password`
-	SinkParamSASLMechanism          = `sasl_mechanism`
-	SinkParamSASLClientID           = `sasl_client_id`
-	SinkParamSASLClientSecret       = `sasl_client_secret`
-	SinkParamSASLTokenURL           = `sasl_token_url`
-	SinkParamSASLScopes             = `sasl_scopes`
-	SinkParamSASLGrantType          = `sasl_grant_type`
-	SinkParamSASLAwsIAMRoleArn      = `sasl_aws_iam_role_arn`
-	SinkParamSASLAwsRegion          = `sasl_aws_region`
-	SinkParamSASLAwsIAMSessionName  = `sasl_aws_iam_session_name`
-	SinkParamTableNameAttribute     = `with_table_name_attribute`
+	// SinkSchemeIceberg is the scheme for the Apache Iceberg changefeed sink.
+	SinkSchemeIceberg              = `iceberg`
+	SinkParamSASLEnabled           = `sasl_enabled`
+	SinkParamSASLHandshake         = `sasl_handshake`
+	SinkParamSASLUser              = `sasl_user`
+	SinkParamSASLPassword          = `sasl_password`
+	SinkParamSASLMechanism         = `sasl_mechanism`
+	SinkParamSASLClientID          = `sasl_client_id`
+	SinkParamSASLClientSecret      = `sasl_client_secret`
+	SinkParamSASLTokenURL          = `sasl_token_url`
+	SinkParamSASLScopes            = `sasl_scopes`
+	SinkParamSASLGrantType         = `sasl_grant_type`
+	SinkParamSASLAwsIAMRoleArn     = `sasl_aws_iam_role_arn`
+	SinkParamSASLAwsRegion         = `sasl_aws_region`
+	SinkParamSASLAwsIAMSessionName = `sasl_aws_iam_session_name`
+	SinkParamTableNameAttribute    = `with_table_name_attribute`
 
 	// These are custom fields required for proprietary oauth. They should not
 	// be documented.
@@ -414,6 +422,7 @@ var ChangefeedOptionExpectValues = map[string]OptionPermittedValues{
 	OptEnrichedProperties:                 csv(string(EnrichedPropertySource), string(EnrichedPropertySchema)),
 	OptHeadersJSONColumnName:              stringOption,
 	OptExtraHeaders:                       jsonOption,
+	OptEqualityDeleteBy:                   stringOption,
 }
 
 // CommonOptions is options common to all sinks
@@ -444,6 +453,10 @@ var WebhookValidOptions = makeStringSet(OptWebhookAuthHeader, OptWebhookClientTi
 
 // PubsubValidOptions is options exclusive to pubsub sink
 var PubsubValidOptions = makeStringSet(OptPubsubSinkConfig)
+
+// IcebergValidOptions is options exclusive to the iceberg sink. This will be
+// extended as the sink matures.
+var IcebergValidOptions = makeStringSet(OptEqualityDeleteBy)
 
 // ExternalConnectionValidOptions is options exclusive to the external
 // connection sink.
