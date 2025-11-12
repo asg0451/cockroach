@@ -77,7 +77,7 @@ func NewReader(
 	leaseMgr *lease.Manager,
 	name string,
 	tableDescID int64,
-) *Reader {
+) (*Reader, error) {
 	r := &Reader{
 		executor:                    executor,
 		mgr:                         mgr,
@@ -102,12 +102,15 @@ func NewReader(
 	}
 	r.goroCtx = ctx
 
-	r.setupRangefeed(ctx)
+	if err := r.setupRangefeed(ctx); err != nil {
+		return nil, errors.Wrap(err, "setting up rangefeed")
+	}
+
 	go r.run(ctx)
-	return r
+	return r, nil
 }
 
-func (r *Reader) setupRangefeed(ctx context.Context) {
+func (r *Reader) setupRangefeed(ctx context.Context) (setupErr error) {
 	defer func() {
 		fmt.Println("setupRangefeed done")
 	}()
@@ -161,20 +164,24 @@ func (r *Reader) setupRangefeed(ctx context.Context) {
 		fmt.Sprintf("queuefeed.reader.name=%s", r.name), initialTS, onValue, opts...,
 	)
 
-	tk := roachpb.Span{Key: r.codec.TablePrefix(uint32(r.tableID))}
-	tk.EndKey = tk.Key.PrefixEnd()
-	spans := []roachpb.Span{tk}
+	tableDesc, err := r.fetchTableDesc(ctx, r.tableID, initialTS)
+	if err != nil {
+		return errors.Wrap(err, "fetching table descriptor")
+	}
+
+	spans := []roachpb.Span{tableDesc.PrimaryIndexSpan(r.codec)}
 
 	fmt.Printf("starting rangefeed with spans: %+v\n", spans)
 
 	if err := rf.Start(ctx, spans); err != nil {
-		setErr(err)
-		return
+		return errors.Wrap(err, "starting rangefeed")
 	}
+
 	_ = context.AfterFunc(r.goroCtx, func() {
 		fmt.Println("closing rangefeed")
 		rf.Close()
 	})()
+	return nil
 }
 
 // - [x] setup rangefeed on data

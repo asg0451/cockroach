@@ -166,7 +166,10 @@ func (m *Manager) getOrInitReaderUncached(ctx context.Context, name string) (*Re
 		return nil, err
 	}
 	fmt.Printf("get or init reader for queue %s with table desc id: %d\n", name, tableDescID)
-	reader := NewReader(ctx, m.executor, m, m.rff, m.codec, m.leaseMgr, name, tableDescID)
+	reader, err := NewReader(ctx, m.executor, m, m.rff, m.codec, m.leaseMgr, name, tableDescID)
+	if err != nil {
+		return nil, err
+	}
 	return reader, nil
 }
 
