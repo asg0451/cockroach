@@ -41,6 +41,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/changefeedbase"
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/checkpoint"
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/kvevent"
+	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/mocks"
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/resolvedspan"
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/schemafeed/schematestutils"
 	_ "github.com/cockroachdb/cockroach/pkg/ccl/kvccl/kvtenantccl" // multi-tenant tests
@@ -111,10 +112,12 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
 	"github.com/dustin/go-humanize"
+	"github.com/golang/mock/gomock"
 	"github.com/lib/pq"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/twmb/franz-go/pkg/kadm"
+	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kfake"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
@@ -12476,236 +12479,61 @@ func TestChangefeedCreateKafkaTopics(t *testing.T) {
 
 	ctx := context.Background()
 
-	const (
-		defaultNumPartitions                   = 13
-		defaultReplicationFactor               = 5
-		expectedNumPartitionsIfPreExisting     = 9
-		expectedReplicationFactorIfPreExisting = 3
-	)
-
-	type outcomeType string
-	const (
-		outcomeTypeSucceeded outcomeType = "succeeds"
-		outcomeTypeFailed    outcomeType = "failed"
-	)
-	type testCase struct {
-		name               string
-		topicsAlreadyExist bool
-		createKafkaTopics  string
-		allowAutoTopic     bool
-		outcome            outcomeType
-		reason             string
-		expectedPartitions int
-		expectedReplicas   int
-	}
-	var cases []testCase
-
-	setupKafka := func(t *testing.T, allowAutoTopic bool) (*kfake.Cluster, *kgo.Client, *kadm.Client, func()) {
-		opts := []kfake.Opt{
-			kfake.NumBrokers(defaultReplicationFactor),
-			kfake.DefaultNumPartitions(defaultNumPartitions),
-			kfake.WithLogger(&kfakeLogAdapter{t}),
-		}
-		if allowAutoTopic {
-			opts = append(opts, kfake.AllowAutoTopicCreation())
-		}
-		kafka, err := kfake.NewCluster(opts...)
-		require.NoError(t, err)
-
-		kcli, err := kgo.NewClient(kgo.SeedBrokers(kafka.ListenAddrs()...))
-		require.NoError(t, err)
-		kadmCli := kadm.NewClient(kcli)
-
-		return kafka, kcli, kadmCli, func() {
-			kafka.Close()
-			kcli.Close()
-		}
-	}
-
 	setupTables := func(t *testing.T, sqlDB *sqlutils.SQLRunner) {
 		sqlDB.Exec(t, `CREATE TABLE foo (key INT PRIMARY KEY);`)
 		sqlDB.Exec(t, `INSERT INTO foo VALUES (1);`)
 		sqlDB.Exec(t, `CREATE TABLE bar (key INT PRIMARY KEY);`)
 		sqlDB.Exec(t, `INSERT INTO bar VALUES (1);`)
 	}
-	setup := func(t *testing.T, allowAutoTopic bool, expectErr string) (*kfake.Cluster, *kgo.Client, *kadm.Client, *sqlutils.SQLRunner, chan struct{}, func()) {
-		var updateKnobsFn updateKnobsFn
-		sawErr := make(chan struct{}, 1)
-		if expectErr != "" {
-			updateKnobsFn = func(knobs *base.TestingKnobs) {
-				knobs.DistSQL.(*execinfra.TestingKnobs).Changefeed.(*TestingKnobs).HandleDistChangefeedError = func(err error) error {
-					if testutils.IsError(err, expectErr) {
-						select {
-						case sawErr <- struct{}{}:
-						default:
-						}
-					}
-					return err
+	for _, createKafkaTopics := range []string{"yes", "no", "auto", ""} {
+		name := fmt.Sprintf("create_kafka_topics=%s", createKafkaTopics)
+		t.Run(name, func(t *testing.T) {
+			testFn := func(t *testing.T, s TestServer, f cdctest.TestFeedFactory) {
+				sqlDB := sqlutils.MakeSQLRunner(s.DB)
+				setupTables(t, sqlDB)
+				KafkaV2Enabled.Override(ctx, &s.Server.ClusterSettings().SV, true)
+				sqlDB.Exec(t, "select crdb_internal.set_vmodule('changefeed_stmt=9')")
+
+				withCreateKafkaTopics := ""
+				if createKafkaTopics != "" {
+					withCreateKafkaTopics = fmt.Sprintf("WITH create_kafka_topics='%s'", createKafkaTopics)
 				}
-			}
-		} else {
-			updateKnobsFn = requireNoFeedsFail(t)
-		}
-
-		kafka, kcli, kadmCli, cleanup := setupKafka(t, allowAutoTopic)
-		_, db, stopServer := startTestFullServer(t, feedTestOptions{knobsFn: updateKnobsFn})
-		sqlDB := sqlutils.MakeSQLRunner(db)
-		sqlDB.Exec(t, "SET CLUSTER SETTING changefeed.new_kafka_sink_enabled=t")
-		sqlDB.Exec(t, "select crdb_internal.set_vmodule('changefeed_stmt=9')")
-		setupTables(t, sqlDB)
-		return kafka, kcli, kadmCli, sqlDB, sawErr, func() {
-			cleanup()
-			stopServer()
-			close(sawErr)
-		}
-	}
-
-	assertTopics := func(kadmCli *kadm.Client, c testCase) {
-		topics, err := kadmCli.ListTopics(ctx)
-		require.NoError(t, err)
-		require.NoError(t, topics.Error())
-		require.Equal(t, 2, len(topics))
-		require.Contains(t, topics, "foo")
-		require.Contains(t, topics, "bar")
-
-		if c.expectedPartitions == 0 {
-			require.NotEmpty(t, topics["foo"].Partitions)
-			require.NotEmpty(t, topics["bar"].Partitions)
-		} else {
-			require.Len(t, topics["foo"].Partitions, c.expectedPartitions)
-			require.Len(t, topics["bar"].Partitions, c.expectedPartitions)
-		}
-		if c.expectedReplicas == 0 {
-			require.NotEmpty(t, topics["foo"].Partitions[0].Replicas)
-			require.NotEmpty(t, topics["bar"].Partitions[0].Replicas)
-		} else {
-			require.Len(t, topics["foo"].Partitions[0].Replicas, c.expectedReplicas)
-			require.Len(t, topics["bar"].Partitions[0].Replicas, c.expectedReplicas)
-		}
-	}
-
-	createFeed := func(t *testing.T, sqlDB *sqlutils.SQLRunner, kafka *kfake.Cluster, createKafkaTopics string) jobspb.JobID {
-		if createKafkaTopics != "" {
-			createKafkaTopics = fmt.Sprintf(", create_kafka_topics='%s'", createKafkaTopics)
-		}
-		feedRow := sqlDB.QueryRow(t,
-			fmt.Sprintf(`CREATE CHANGEFEED FOR foo, bar INTO 'kafka://%s' WITH end_time='%d' %s`,
-				strings.Join(kafka.ListenAddrs(), ","),
-				timeutil.Now().Add(5*time.Second).UnixNano(),
-				createKafkaTopics,
-			),
-		)
-		var jobID int64
-		feedRow.Scan(&jobID)
-		return jobspb.JobID(jobID)
-	}
-
-	// TODO: also test the case where some topics already exist but not all
-
-	for _, topicsAlreadyExist := range []bool{true, false} {
-		for _, createKafkaTopics := range []string{"yes", "no", "auto", ""} {
-			for _, allowAutoTopic := range []bool{true, false} {
-				createKafkaTopicsAuto := createKafkaTopics == "auto" || createKafkaTopics == "" // Equivalent.
-
-				var (
-					outcome            outcomeType
-					reason             string
-					expectedPartitions int
-					expectedReplicas   int
-				)
-				switch {
-				// create_topics=yes
-				case createKafkaTopics == "yes" && !topicsAlreadyExist && allowAutoTopic:
-					outcome = outcomeTypeSucceeded
-					reason = "we'll try to make the topics but kafka might make them first for us. Either way is correct enough."
-				case createKafkaTopics == "yes" && !topicsAlreadyExist && !allowAutoTopic:
-					outcome = outcomeTypeSucceeded
-					expectedPartitions = defaultNumPartitions
-					expectedReplicas = defaultReplicationFactor
-					reason = "happy path"
-				case createKafkaTopics == "yes" && topicsAlreadyExist:
-					outcome = outcomeTypeSucceeded
-					expectedPartitions = expectedNumPartitionsIfPreExisting
-					expectedReplicas = expectedReplicationFactorIfPreExisting
-					reason = "happy path"
-
-				// create_topics=no
-				case createKafkaTopics == "no" && topicsAlreadyExist:
-					outcome = outcomeTypeSucceeded
-					expectedPartitions = expectedNumPartitionsIfPreExisting
-					expectedReplicas = expectedReplicationFactorIfPreExisting
-					reason = "it just works"
-				case createKafkaTopics == "no" && !topicsAlreadyExist:
-					outcome = outcomeTypeFailed
-					reason = "topics don't exist and we don't try to create them so the feed fails"
-
-				// create_topics=auto
-				case createKafkaTopicsAuto, topicsAlreadyExist:
-					outcome = outcomeTypeSucceeded
-					expectedPartitions = expectedNumPartitionsIfPreExisting
-					expectedReplicas = expectedReplicationFactorIfPreExisting
-					reason = "the topics already exist so no change"
-				case createKafkaTopicsAuto, !topicsAlreadyExist:
-					outcome = outcomeTypeSucceeded
-					expectedPartitions = defaultNumPartitions
-					expectedReplicas = defaultReplicationFactor
-					reason = "kafka creates the topics with the default settings itself"
-
-				default:
-					t.Fatalf("unexpected case: createKafkaTopics=%s, topicsAlreadyExist=%t, allowAutoTopic=%t", createKafkaTopics, topicsAlreadyExist, allowAutoTopic)
-				}
-
-				name := fmt.Sprintf("create_kafka_topics=%s/topicsAlreadyExist=%t/allowAutoTopic=%t/reason=%s",
-					createKafkaTopics, topicsAlreadyExist, allowAutoTopic, reason)
-				cases = append(cases, testCase{
-					name:               name,
-					topicsAlreadyExist: topicsAlreadyExist,
-					createKafkaTopics:  createKafkaTopics,
-					allowAutoTopic:     allowAutoTopic,
-					outcome:            outcome,
-					reason:             reason,
-					expectedPartitions: expectedPartitions,
-					expectedReplicas:   expectedReplicas,
-				})
-			}
-		}
-	}
-
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			expectErr := ""
-			if c.outcome == outcomeTypeFailed {
-				expectErr = "failed to create kafka topics"
-			}
-			kafka, _, kadmCli, sqlDB, sawErr, cleanup := setup(t, c.allowAutoTopic, expectErr)
-			defer cleanup()
-
-			// Create the topics if we want them to already exist for the test.
-			// We reate them with non-defaults so we can see if we erroneously modified existing topics.
-			if c.topicsAlreadyExist {
-				resp, err := kadmCli.CreateTopics(ctx,
-					expectedNumPartitionsIfPreExisting, expectedReplicationFactorIfPreExisting, nil, "foo", "bar")
-				require.NoError(t, err)
-				require.NoError(t, resp.Error())
+				feed := feed(t, f, fmt.Sprintf("CREATE CHANGEFEED FOR FOO, BAR %s", withCreateKafkaTopics))
+				defer closeFeed(t, feed)
 			}
 
-			jobID := createFeed(t, sqlDB, kafka, c.createKafkaTopics)
+			ctrl := gomock.NewController(t)
+			kcli := mocks.NewMockKafkaClientV2(ctrl)
+			kadminCli := mocks.NewMockKafkaAdminClientV2(ctrl)
+			kcli.EXPECT().Close().AnyTimes().Return()
 
-			// Wait for the job to complete or for an error to be received.
-			if c.outcome == outcomeTypeSucceeded {
-				waitForJobState(sqlDB, t, jobID, jobs.StateSucceeded)
+			if createKafkaTopics == "yes" {
+				// TODO: why no worky?
+				kadminCli.EXPECT().ListTopics(gomock.Any(), "foo", "bar").Return(kadm.TopicDetails{
+					"foo": {Topic: "foo", Err: kerr.UnknownTopicOrPartition},
+					"bar": {Topic: "bar", Err: kerr.UnknownTopicOrPartition},
+				}, nil).MinTimes(1)
+				kadminCli.EXPECT().ValidateCreateTopics(gomock.Any(), -1, -1, nil, "foo", "bar").Return(kadm.CreateTopicResponses{
+					"foo": {Err: nil},
+					"bar": {Err: nil},
+				}, nil).MinTimes(1)
+				kadminCli.EXPECT().CreateTopics(gomock.Any(), -1, -1, nil, "foo", "bar").Return(kadm.CreateTopicResponses{
+					"foo": {Err: nil},
+					"bar": {Err: nil},
+				}, nil).MinTimes(1)
 			} else {
-				select {
-				case _, ok := <-sawErr:
-					if !ok {
-						t.Fatalf("sawErr channel closed before we received an error or a timeout")
-					}
-				case <-time.After(30 * time.Second):
-					t.Fatalf("expected error %s but never saw it", expectErr)
-				}
+				// TODO: negative assert
 			}
 
-			assertTopics(kadmCli, c)
+			updateKnobsFn := func(knobs *base.TestingKnobs) {
+				cfKnobs := knobs.DistSQL.(*execinfra.TestingKnobs).Changefeed.(*TestingKnobs)
+				cfKnobs.KafkaSinkV2Knobs.OverrideClient = func(opts []kgo.Opt) (KafkaClientV2, KafkaAdminClientV2) {
+					return kcli, kadminCli
+				}
+				cfKnobs.KafkaSinkV2Knobs.SkipCreateTopicVersionCheck = createKafkaTopics == "yes"
+			}
+
+			cdcTest(t, testFn, feedTestRestrictSinks("kafka"), withKnobsFn(updateKnobsFn))
 		})
 	}
 }

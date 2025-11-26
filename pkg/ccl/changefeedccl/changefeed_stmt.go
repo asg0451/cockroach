@@ -1000,6 +1000,10 @@ func createChangefeedJobRecord(
 	// need to have this line once.
 	details.Opts = opts.AsMap()
 
+	var knobs TestingKnobs
+	if k, ok := p.ExecCfg().DistSQLSrv.TestingKnobs.Changefeed.(*TestingKnobs); ok {
+		knobs = *k
+	}
 	// In the case where a user is executing a CREATE CHANGEFEED and is still
 	// waiting for the statement to return, we take the opportunity to ensure
 	// that the user has not made any obvious errors when specifying the sink in
@@ -1009,7 +1013,7 @@ func createChangefeedJobRecord(
 	// but are inappropriate for the provided sink.
 	// TODO: Ideally those option validations would happen in validateDetails()
 	// earlier, like the others.
-	err = validateSink(ctx, p, jobID, details, opts, targets)
+	err = validateSink(ctx, p, jobID, details, opts, targets, knobs)
 	if err != nil {
 		return nil, changefeedbase.Targets{}, err
 	}
@@ -1312,6 +1316,7 @@ func validateSink(
 	details jobspb.ChangefeedDetails,
 	opts changefeedbase.StatementOptions,
 	targets changefeedbase.Targets,
+	knobs TestingKnobs,
 ) error {
 	metrics := p.ExecCfg().JobRegistry.MetricsStruct().Changefeed.(*Metrics)
 	scope, _ := opts.GetMetricScope()
@@ -1340,7 +1345,7 @@ func validateSink(
 
 	var nilOracle timestampLowerBoundOracle
 	canarySink, err := getAndDialSink(ctx, &p.ExecCfg().DistSQLSrv.ServerConfig, details,
-		nilOracle, p.User(), jobID, sli, targets)
+		nilOracle, p.User(), jobID, sli, targets, knobs)
 	if err != nil {
 		return err
 	}
@@ -1772,7 +1777,7 @@ func (b *changefeedResumer) resumeWithRetries(
 				return err
 			}
 
-			if err := maybeCreateKafkaTopics(ctx, details, targets, &execCfg.Settings.SV); err != nil {
+			if err := maybeCreateKafkaTopics(ctx, details, targets, &execCfg.Settings.SV, knobs.KafkaSinkV2Knobs); err != nil {
 				return errors.Wrap(err, "failed to create kafka topics")
 			}
 
@@ -2413,7 +2418,7 @@ func buildTableToDatabaseAndSchemaLookup(
 }
 
 func maybeCreateKafkaTopics(
-	ctx context.Context, details jobspb.ChangefeedDetails, targets changefeedbase.Targets, sv *settings.Values,
+	ctx context.Context, details jobspb.ChangefeedDetails, targets changefeedbase.Targets, sv *settings.Values, knobs kafkaSinkV2Knobs,
 ) error {
 	ctx, span := tracing.ChildSpan(ctx, "maybeCreateKafkaTopics")
 	defer span.Finish()
@@ -2463,13 +2468,11 @@ func maybeCreateKafkaTopics(
 	if err != nil {
 		return err
 	}
-	client, adminClient, err := buildKafkaClients(ctx, bootstrapBrokers, false /* allowAutoTopic */, clientOpts, kafkaSinkV2Knobs{})
+	client, kadmClient, err := buildKafkaClients(ctx, bootstrapBrokers, false /* allowAutoTopic */, clientOpts, knobs)
 	if err != nil {
 		return err
 	}
 	defer client.Close()
-
-	kadmClient := adminClient.(*kadm.Client)
 
 	// Check for topics existence first, so that clusters under the supported api version can still work if they already have the topics
 	allExist, preExistingTopics, err := topicsAlreadyExist(ctx, kadmClient, topicsSet)
@@ -2481,7 +2484,7 @@ func maybeCreateKafkaTopics(
 		return nil
 	}
 
-	if err := ensureWeCanCreateKafkaTopics(ctx, kadmClient); err != nil {
+	if err := ensureWeCanCreateKafkaTopics(ctx, kadmClient, knobs); err != nil {
 		return err
 	}
 
@@ -2531,11 +2534,15 @@ func maybeCreateKafkaTopics(
 // topics with default values (-1), and returns an error if it doesn't. The
 // actual check is a bit strange but essentially we need to make sure all the
 // brokers support the create topics api at least at v2.4.0 level.
-func ensureWeCanCreateKafkaTopics(ctx context.Context, adminClient *kadm.Client) error {
+func ensureWeCanCreateKafkaTopics(ctx context.Context, adminClient KafkaAdminClientV2, knobs kafkaSinkV2Knobs) error {
 	v24 := kversion.V2_4_0()
 	v24kvm, ok := v24.LookupMaxKeyVersion(kmsg.CreateTopics.Int16())
 	if !ok {
 		return errors.AssertionFailedf("v2.4.0 does not support create topics but it should")
+	}
+
+	if knobs.SkipCreateTopicVersionCheck {
+		return nil
 	}
 
 	vr, err := adminClient.ApiVersions(ctx)
@@ -2562,7 +2569,7 @@ func ensureWeCanCreateKafkaTopics(ctx context.Context, adminClient *kadm.Client)
 // It returns true if all the topics exist, the details of the topics if they exist,
 // and an error if there is an error.
 func topicsAlreadyExist(
-	ctx context.Context, adminClient *kadm.Client, topicsSet map[string]struct{},
+	ctx context.Context, adminClient KafkaAdminClientV2, topicsSet map[string]struct{},
 ) (bool, kadm.TopicDetails, error) {
 	tr, err := adminClient.ListTopics(ctx, slices.Collect(maps.Keys(topicsSet))...)
 	if err != nil {
