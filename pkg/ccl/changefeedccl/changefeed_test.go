@@ -114,6 +114,7 @@ import (
 	"github.com/lib/pq"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/twmb/franz-go/pkg/kfake"
 )
 
 var testServerRegion = "us-east-1"
@@ -12674,6 +12675,131 @@ func TestCloudstorageParallelCompression(t *testing.T) {
 			time.Sleep(checkStatusInterval)
 		}
 	})
+}
+
+// TestChangefeedCreateKafkaTopics tests the different modes of the create_kafka_topics option.
+// - "no": does not create topics (Kafka's auto-create must be enabled)
+// - "auto": uses kgo.AllowAutoTopicCreation() which tells the broker to auto-create
+// - "yes": topics are created lazily by the sink when UnknownTopicOrPartition errors
+//          are encountered. The lazy creation logic is tested in
+//          TestKafkaSinkClientV2_LazyTopicCreation in sink_kafka_v2_test.go.
+func TestChangefeedCreateKafkaTopics(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	ctx := context.Background()
+
+	setupTables := func(t *testing.T, sqlDB *sqlutils.SQLRunner) {
+		sqlDB.Exec(t, `CREATE TABLE foo (key INT PRIMARY KEY);`)
+		sqlDB.Exec(t, `INSERT INTO foo VALUES (1);`)
+		sqlDB.Exec(t, `CREATE TABLE bar (key INT PRIMARY KEY);`)
+		sqlDB.Exec(t, `INSERT INTO bar VALUES (1);`)
+	}
+	// Note: The "yes" case tests that the option works correctly with the sink.
+	// Actual topic creation logic (for new topics) is tested in
+	// TestKafkaSinkClientV2_LazyTopicCreation.
+	for _, createKafkaTopics := range []string{"yes", "no", "auto", ""} {
+		name := fmt.Sprintf("create_kafka_topics=%s", createKafkaTopics)
+		t.Run(name, func(t *testing.T) {
+			testFn := func(t *testing.T, s TestServer, f cdctest.TestFeedFactory) {
+				sqlDB := sqlutils.MakeSQLRunner(s.DB)
+				setupTables(t, sqlDB)
+				KafkaV2Enabled.Override(ctx, &s.Server.ClusterSettings().SV, true)
+
+				withCreateKafkaTopics := ""
+				if createKafkaTopics != "" {
+					withCreateKafkaTopics = fmt.Sprintf("WITH create_kafka_topics='%s'", createKafkaTopics)
+				}
+				// Opt out of enriched envelope since it can change topic naming behavior.
+				feed := feed(t, f, fmt.Sprintf("CREATE CHANGEFEED FOR FOO, BAR %s", withCreateKafkaTopics),
+					optOutOfMetamorphicEnrichedEnvelope{reason: "enriched envelope changes topic naming"})
+				defer closeFeed(t, feed)
+			}
+
+			cdcTest(t, testFn, feedTestRestrictSinks("kafka"), feedTestNoExternalConnection)
+		})
+	}
+}
+
+type kfakeLogAdapter struct {
+	t *testing.T
+}
+
+func (k *kfakeLogAdapter) Logf(level kfake.LogLevel, msg string, args ...any) {
+	k.t.Logf(msg, args...)
+}
+
+func (k *kfakeLogAdapter) Level() kfake.LogLevel {
+	return kfake.LogLevelDebug
+}
+
+var _ kfake.Logger = &kfakeLogAdapter{}
+
+func TestDatabaseLevelChangefeed(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	testFn := func(t *testing.T, s TestServer, f cdctest.TestFeedFactory) {
+		sqlDB := sqlutils.MakeSQLRunner(s.DB)
+		// Headers are not supported in the v1 kafka sink.
+		sqlDB.Exec(t, `SET CLUSTER SETTING changefeed.new_kafka_sink.enabled = true`)
+
+		sqlDB.Exec(t, `CREATE TABLE foo (key INT PRIMARY KEY);`)
+		sqlDB.Exec(t, `INSERT INTO foo VALUES (1);`)
+
+		cases := []struct {
+			name        string
+			headersArg  string
+			wantHeaders cdctest.Headers
+			expectErr   bool
+		}{
+			{
+				name:        "single header",
+				headersArg:  `{"X-Someheader": "somevalue"}`,
+				wantHeaders: cdctest.Headers{{K: "X-Someheader", V: []byte("somevalue")}},
+			},
+			{
+				name:       "multiple headers",
+				headersArg: `{"X-Someheader": "somevalue", "X-Someotherheader": "someothervalue"}`,
+				wantHeaders: cdctest.Headers{
+					{K: "X-Someheader", V: []byte("somevalue")},
+					{K: "X-Someotherheader", V: []byte("someothervalue")},
+				},
+			},
+			{
+				name:       "inappropriate json",
+				headersArg: `4`,
+				expectErr:  true,
+			},
+			{
+				name:       "also inappropriate json",
+				headersArg: `["X-Someheader", "somevalue"]`,
+				expectErr:  true,
+			},
+			{
+				name:       "invalid json",
+				headersArg: `xxxx`,
+				expectErr:  true,
+			},
+		}
+
+		for _, c := range cases {
+			feed, err := f.Feed(fmt.Sprintf(`CREATE CHANGEFEED FOR foo WITH extra_headers='%s'`, c.headersArg))
+			if c.expectErr {
+				require.Error(t, err)
+				continue
+			} else {
+				require.NoError(t, err)
+			}
+
+			assertPayloads(t, feed, []string{
+				fmt.Sprintf(`foo: [1]%s->{"after": {"key": 1}}`, c.wantHeaders.String()),
+			})
+			closeFeed(t, feed)
+		}
+	}
+
+	cdcTest(t, testFn, feedTestRestrictSinks("kafka", "webhook"))
 }
 
 func TestChangefeedExtraHeaders(t *testing.T) {

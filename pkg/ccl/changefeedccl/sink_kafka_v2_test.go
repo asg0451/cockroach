@@ -761,7 +761,7 @@ func newKafkaSinkV2Fx(t *testing.T, opts ...fxOpt) *kafkaSinkV2Fx {
 	var err error
 	fx.sink, err = newKafkaSinkClientV2(ctx, fx.additionalKOpts,
 		fx.batchConfig, uri, settings, knobs, nilMetricsRecorderBuilder,
-		nil, nil, "" /* partitionAlg */)
+		nil, nil, changefeedbase.CreateKafkaTopicsAuto, "" /* partitionAlg */)
 	if err != nil && fx.createClientErrorCb != nil {
 		fx.createClientErrorCb(err)
 		return fx
@@ -782,7 +782,10 @@ func newKafkaSinkV2Fx(t *testing.T, opts ...fxOpt) *kafkaSinkV2Fx {
 	}
 	u.RawQuery = q.Encode()
 
-	bs, err := makeKafkaSinkV2(ctx, &changefeedbase.SinkURL{URL: u}, targets, changefeedbase.KafkaSinkOptions{JSONConfig: fx.sinkJSONConfig}, 1, nilPacerFactory, timeutil.DefaultTimeSource{}, settings, nilMetricsRecorderBuilder, knobs)
+	sinkOpts := changefeedbase.KafkaSinkOptions{
+		JSONConfig: fx.sinkJSONConfig,
+	}
+	bs, err := makeKafkaSinkV2(ctx, &changefeedbase.SinkURL{URL: u}, targets, sinkOpts, 1, nilPacerFactory, timeutil.DefaultTimeSource{}, settings, nilMetricsRecorderBuilder, knobs, changefeedbase.CreateKafkaTopicsAuto)
 	if err != nil && fx.createClientErrorCb != nil {
 		fx.createClientErrorCb(err)
 		return fx
@@ -816,3 +819,113 @@ func (f fnMatcher) String() string {
 }
 
 var _ gomock.Matcher = fnMatcher(nil)
+
+// TestKafkaSinkClientV2_LazyTopicCreation tests that when createTopicsManually
+// is true, the sink creates topics lazily using ListTopics to check existence
+// before producing. This is the mechanism that supports column families with
+// split_column_families option, where actual topic names (e.g., foo.f_a)
+// are only known at emit time, not at changefeed creation time.
+func TestKafkaSinkClientV2_LazyTopicCreation(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	kc := mocks.NewMockKafkaClientV2(ctrl)
+	ac := mocks.NewMockKafkaAdminClientV2(ctrl)
+
+	settings := cluster.MakeTestingClusterSettings()
+
+	// Track which topics have been created.
+	createdTopics := make(map[string]struct{})
+
+	// Create the sink client directly with createTopicsManually=true
+	knobs := kafkaSinkV2Knobs{
+		OverrideClient: func(opts []kgo.Opt) (KafkaClientV2, KafkaAdminClientV2) {
+			return kc, ac
+		},
+		SkipCreateTopicVersionCheck: true,
+	}
+
+	sink, err := newKafkaSinkClientV2(ctx, nil, sinkBatchConfig{},
+		"localhost:9092", settings, knobs, nilMetricsRecorderBuilder,
+		[]string{"foo.f_a", "foo.f_c"}, // topics for connection check
+		nil,                            // headers
+		changefeedbase.CreateKafkaTopicsYes,
+		"", // partitionAlg
+	)
+	require.NoError(t, err)
+	defer func() {
+		kc.EXPECT().Close().AnyTimes()
+		require.NoError(t, sink.Close())
+	}()
+
+	// Mock ListTopics to return UnknownTopicOrPartition for topics not yet created.
+	ac.EXPECT().ListTopics(gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, topics ...string) (kadm.TopicDetails, error) {
+			result := make(kadm.TopicDetails)
+			for _, topic := range topics {
+				if _, exists := createdTopics[topic]; exists {
+					result[topic] = kadm.TopicDetail{
+						Topic:      topic,
+						Partitions: map[int32]kadm.PartitionDetail{0: {}},
+					}
+				} else {
+					result[topic] = kadm.TopicDetail{
+						Topic: topic,
+						Err:   kerr.UnknownTopicOrPartition,
+					}
+				}
+			}
+			return result, nil
+		}).AnyTimes()
+
+	// Mock CreateTopics to track which topics are created.
+	ac.EXPECT().CreateTopics(gomock.Any(), int32(-1), int16(-1), gomock.Nil(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ int32, _ int16, _ map[string]*string, topics ...string) (kadm.CreateTopicResponses, error) {
+			result := make(kadm.CreateTopicResponses)
+			for _, topic := range topics {
+				// Verify no placeholder in topic names.
+				require.NotContains(t, topic, "{family}", "topic name should not contain placeholder")
+				require.NotContains(t, topic, "_u007b_", "topic name should not contain sanitized placeholder")
+				createdTopics[topic] = struct{}{}
+				result[topic] = kadm.CreateTopicResponse{
+					Topic:             topic,
+					NumPartitions:     1,
+					ReplicationFactor: 1,
+				}
+			}
+			return result, nil
+		}).AnyTimes()
+
+	// Mock ProduceSync to succeed (topics will be verified before this is called).
+	produceCallCount := 0
+	kc.EXPECT().ProduceSync(gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, msgs ...*kgo.Record) kgo.ProduceResults {
+			produceCallCount++
+			results := make(kgo.ProduceResults, len(msgs))
+			for i, msg := range msgs {
+				results[i] = kgo.ProduceResult{Record: msg, Err: nil}
+			}
+			return results
+		}).AnyTimes()
+
+	// Create messages for two different family topics.
+	msg1 := &kgo.Record{Topic: "foo.f_a", Key: []byte("k1"), Value: []byte("v1")}
+	msg2 := &kgo.Record{Topic: "foo.f_c", Key: []byte("k2"), Value: []byte("v2")}
+
+	// Flush should check topics via ListTopics, create missing ones, then produce.
+	err = sink.Flush(ctx, []*kgo.Record{msg1})
+	require.NoError(t, err)
+	require.Contains(t, createdTopics, "foo.f_a", "topic foo.f_a should have been created")
+
+	// Flush the second message for a different family topic.
+	err = sink.Flush(ctx, []*kgo.Record{msg2})
+	require.NoError(t, err)
+	require.Contains(t, createdTopics, "foo.f_c", "topic foo.f_c should have been created")
+
+	// ProduceSync should have been called once per flush.
+	require.Equal(t, 2, produceCallCount, "ProduceSync should be called once per flush")
+}

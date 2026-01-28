@@ -999,6 +999,10 @@ func createChangefeedJobRecord(
 	// need to have this line once.
 	details.Opts = opts.AsMap()
 
+	var knobs TestingKnobs
+	if k, ok := p.ExecCfg().DistSQLSrv.TestingKnobs.Changefeed.(*TestingKnobs); ok {
+		knobs = *k
+	}
 	// In the case where a user is executing a CREATE CHANGEFEED and is still
 	// waiting for the statement to return, we take the opportunity to ensure
 	// that the user has not made any obvious errors when specifying the sink in
@@ -1008,7 +1012,7 @@ func createChangefeedJobRecord(
 	// but are inappropriate for the provided sink.
 	// TODO: Ideally those option validations would happen in validateDetails()
 	// earlier, like the others.
-	err = validateSink(ctx, p, jobID, details, opts, targets)
+	err = validateSink(ctx, p, jobID, details, opts, targets, knobs)
 	if err != nil {
 		return nil, changefeedbase.Targets{}, err
 	}
@@ -1311,6 +1315,7 @@ func validateSink(
 	details jobspb.ChangefeedDetails,
 	opts changefeedbase.StatementOptions,
 	targets changefeedbase.Targets,
+	knobs TestingKnobs,
 ) error {
 	metrics := p.ExecCfg().JobRegistry.MetricsStruct().Changefeed.(*Metrics)
 	scope, _ := opts.GetMetricScope()
@@ -1339,7 +1344,7 @@ func validateSink(
 
 	var nilOracle timestampLowerBoundOracle
 	canarySink, err := getAndDialSink(ctx, &p.ExecCfg().DistSQLSrv.ServerConfig, details,
-		nilOracle, p.User(), jobID, sli, targets)
+		nilOracle, p.User(), jobID, sli, targets, knobs)
 	if err != nil {
 		return err
 	}
@@ -1561,6 +1566,22 @@ func validateDetailsAndOptions(
 				changefeedbase.OptPartitionAlg,
 				changefeedbase.PartitionAlgEnabled.Name(),
 			)
+		}
+	}
+
+	// Validate that create_kafka_topics='yes' requires the v2 kafka sink.
+	createTopics, err := opts.GetCreateKafkaTopics()
+	if err != nil {
+		return err
+	}
+	if createTopics == changefeedbase.CreateKafkaTopicsYes {
+		parsedSinkURL, err := url.Parse(details.SinkURI)
+		if err != nil {
+			return err
+		}
+		if isKafkaSink(parsedSinkURL) && !KafkaV2Enabled.Get(&settings.SV) {
+			return errors.Newf("Automatic topic creation is only supported for changefeeds using the v2 kafka sink. "+
+				"Consider enabling it with the %q cluster setting.", KafkaV2Enabled.Name())
 		}
 	}
 
@@ -1831,9 +1852,7 @@ func (b *changefeedResumer) resumeWithRetries(
 	defer watcherMemMonitor.Stop(ctx)
 
 	for r := getRetry(ctx, maxBackoff, backoffReset); r.Next(); {
-		flowErr := maybeUpgradePreProductionReadyExpression(ctx, jobID, details, jobExec)
-
-		if flowErr == nil {
+		flowErr := func() error {
 			// startedCh is normally used to signal back to the creator of the job that
 			// the job has started; however, in this case nothing will ever receive
 			// on the channel, causing the changefeed flow to block. Replace it with
@@ -1855,6 +1874,10 @@ func (b *changefeedResumer) resumeWithRetries(
 			}
 			targets, err := AllTargets(ctx, details, execCfg, schemaTS)
 			if err != nil {
+				return err
+			}
+
+			if err := maybeUpgradePreProductionReadyExpression(ctx, jobID, details, jobExec); err != nil {
 				return err
 			}
 
@@ -1948,20 +1971,20 @@ func (b *changefeedResumer) resumeWithRetries(
 				}
 			})
 
-			flowErr = g.Wait()
+			return g.Wait()
+		}()
 
-			if flowErr == nil {
-				return nil // Changefeed completed -- e.g. due to initial_scan=only mode.
-			}
+		if flowErr == nil {
+			return nil // Changefeed completed -- e.g. due to initial_scan=only mode.
+		}
 
-			if errors.Is(flowErr, replanErr) {
-				log.Changefeed.Infof(ctx, "restarting changefeed due to updated configuration")
-				continue
-			}
+		if errors.Is(flowErr, replanErr) {
+			log.Changefeed.Infof(ctx, "restarting changefeed due to updated configuration")
+			continue
+		}
 
-			if knobs != nil && knobs.HandleDistChangefeedError != nil {
-				flowErr = knobs.HandleDistChangefeedError(flowErr)
-			}
+		if knobs != nil && knobs.HandleDistChangefeedError != nil {
+			flowErr = knobs.HandleDistChangefeedError(flowErr)
 		}
 
 		// Terminate changefeed if needed.
