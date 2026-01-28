@@ -41,7 +41,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/changefeedbase"
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/checkpoint"
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/kvevent"
-	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/mocks"
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/resolvedspan"
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/schemafeed/schematestutils"
 	_ "github.com/cockroachdb/cockroach/pkg/ccl/kvccl/kvtenantccl" // multi-tenant tests
@@ -112,14 +111,10 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
 	"github.com/dustin/go-humanize"
-	"github.com/golang/mock/gomock"
 	"github.com/lib/pq"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/twmb/franz-go/pkg/kadm"
-	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kfake"
-	"github.com/twmb/franz-go/pkg/kgo"
 )
 
 var testServerRegion = "us-east-1"
@@ -12682,6 +12677,12 @@ func TestCloudstorageParallelCompression(t *testing.T) {
 	})
 }
 
+// TestChangefeedCreateKafkaTopics tests the different modes of the create_kafka_topics option.
+// - "no": does not create topics (Kafka's auto-create must be enabled)
+// - "auto": uses kgo.AllowAutoTopicCreation() which tells the broker to auto-create
+// - "yes": topics are created lazily by the sink when UnknownTopicOrPartition errors
+//          are encountered. The lazy creation logic is tested in
+//          TestKafkaSinkClientV2_LazyTopicCreation in sink_kafka_v2_test.go.
 func TestChangefeedCreateKafkaTopics(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
@@ -12694,41 +12695,16 @@ func TestChangefeedCreateKafkaTopics(t *testing.T) {
 		sqlDB.Exec(t, `CREATE TABLE bar (key INT PRIMARY KEY);`)
 		sqlDB.Exec(t, `INSERT INTO bar VALUES (1);`)
 	}
+	// Note: The "yes" case tests that the option works correctly with the sink.
+	// Actual topic creation logic (for new topics) is tested in
+	// TestKafkaSinkClientV2_LazyTopicCreation.
 	for _, createKafkaTopics := range []string{"yes", "no", "auto", ""} {
 		name := fmt.Sprintf("create_kafka_topics=%s", createKafkaTopics)
 		t.Run(name, func(t *testing.T) {
-			ctrl := gomock.NewController(t)
-			kcli := mocks.NewMockKafkaClientV2(ctrl)
-			kadminCli := mocks.NewMockKafkaAdminClientV2(ctrl)
-			kcli.EXPECT().Close().AnyTimes().Return()
-
-			// Channel to signal when topic creation is complete (only used for create_kafka_topics=yes).
-			topicsCreatedCh := make(chan struct{})
-			var closeOnce sync.Once
-
-			if createKafkaTopics == "yes" {
-				listTopicsReturn := kadm.TopicDetails{
-					"foo": {Topic: "foo", Err: kerr.UnknownTopicOrPartition},
-					"bar": {Topic: "bar", Err: kerr.UnknownTopicOrPartition},
-				}
-				createTopicsReturn := kadm.CreateTopicResponses{
-					"foo": {Err: nil},
-					"bar": {Err: nil},
-				}
-				kadminCli.EXPECT().ListTopics(gomock.Any(), gomock.Any(), gomock.Any()).Return(listTopicsReturn, nil).MinTimes(1)
-				kadminCli.EXPECT().ValidateCreateTopics(gomock.Any(), int32(-1), int16(-1), nil, gomock.Any(), gomock.Any()).Return(createTopicsReturn, nil).MinTimes(1)
-				kadminCli.EXPECT().CreateTopics(gomock.Any(), int32(-1), int16(-1), nil, gomock.Any(), gomock.Any()).
-					DoAndReturn(func(_ context.Context, _ int32, _ int16, _ map[string]*string, _ ...string) (kadm.CreateTopicResponses, error) {
-						closeOnce.Do(func() { close(topicsCreatedCh) })
-						return createTopicsReturn, nil
-					}).MinTimes(1)
-			}
-
 			testFn := func(t *testing.T, s TestServer, f cdctest.TestFeedFactory) {
 				sqlDB := sqlutils.MakeSQLRunner(s.DB)
 				setupTables(t, sqlDB)
 				KafkaV2Enabled.Override(ctx, &s.Server.ClusterSettings().SV, true)
-				sqlDB.Exec(t, "select crdb_internal.set_vmodule('changefeed_stmt=9')")
 
 				withCreateKafkaTopics := ""
 				if createKafkaTopics != "" {
@@ -12738,26 +12714,9 @@ func TestChangefeedCreateKafkaTopics(t *testing.T) {
 				feed := feed(t, f, fmt.Sprintf("CREATE CHANGEFEED FOR FOO, BAR %s", withCreateKafkaTopics),
 					optOutOfMetamorphicEnrichedEnvelope{reason: "enriched envelope changes topic naming"})
 				defer closeFeed(t, feed)
-
-				// For create_kafka_topics=yes, wait for topic creation to complete before closing the feed.
-				if createKafkaTopics == "yes" {
-					select {
-					case <-topicsCreatedCh:
-					case <-time.After(30 * time.Second):
-						t.Fatal("timed out waiting for topics to be created")
-					}
-				}
 			}
 
-			updateKnobsFn := func(knobs *base.TestingKnobs) {
-				cfKnobs := knobs.DistSQL.(*execinfra.TestingKnobs).Changefeed.(*TestingKnobs)
-				cfKnobs.KafkaSinkV2Knobs.OverrideClient = func(opts []kgo.Opt) (KafkaClientV2, KafkaAdminClientV2) {
-					return kcli, kadminCli
-				}
-				cfKnobs.KafkaSinkV2Knobs.SkipCreateTopicVersionCheck = createKafkaTopics == "yes"
-			}
-
-			cdcTest(t, testFn, feedTestRestrictSinks("kafka"), feedTestNoExternalConnection, withKnobsFn(updateKnobsFn))
+			cdcTest(t, testFn, feedTestRestrictSinks("kafka"), feedTestNoExternalConnection)
 		})
 	}
 }

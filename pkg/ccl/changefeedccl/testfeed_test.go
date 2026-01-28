@@ -1945,6 +1945,22 @@ func (s *fakeKafkaSinkV2) Dial() error {
 		}
 		return td, nil
 	}).AnyTimes()
+	// Mock CreateTopics for create_kafka_topics='yes' tests. Since ListTopics always
+	// returns topics as existing, this won't typically be called, but the mock is needed
+	// for testing the 'yes' option. See TestKafkaSinkClientV2_LazyTopicCreation for
+	// unit testing of actual topic creation behavior.
+	s.adminClient.EXPECT().CreateTopics(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(ctx context.Context, partitions int32, replicationFactor int16, configs map[string]*string, topics ...string) (kadm.CreateTopicResponses, error) {
+			result := make(kadm.CreateTopicResponses)
+			for _, topic := range topics {
+				result[topic] = kadm.CreateTopicResponse{
+					Topic:             topic,
+					NumPartitions:     1,
+					ReplicationFactor: 1,
+				}
+			}
+			return result, nil
+		}).AnyTimes()
 	kc.adminClient = s.adminClient
 
 	return bs.Dial()

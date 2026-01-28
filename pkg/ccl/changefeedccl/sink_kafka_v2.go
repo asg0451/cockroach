@@ -33,6 +33,7 @@ import (
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
+	"github.com/twmb/franz-go/pkg/kmsg"
 	"github.com/twmb/franz-go/pkg/kversion"
 )
 
@@ -50,10 +51,11 @@ type kafkaSinkClientV2 struct {
 	constHeaders             []kgo.RecordHeader
 	createTopicsManually     bool
 
-	// we need to fetch and keep track of this ourselves since kgo doesnt expose metadata to us
+	// metadataMu protects topic metadata.
 	metadataMu struct {
 		syncutil.Mutex
 		allTopicPartitions  map[string][]int32
+		verifiedTopics      map[string]struct{}
 		lastMetadataRefresh time.Time
 	}
 }
@@ -106,6 +108,7 @@ func newKafkaSinkClientV2(
 		createTopicsManually:     createTopics == changefeedbase.CreateKafkaTopicsYes,
 	}
 	c.metadataMu.allTopicPartitions = make(map[string][]int32)
+	c.metadataMu.verifiedTopics = make(map[string]struct{})
 
 	return c, nil
 }
@@ -117,50 +120,140 @@ func (k *kafkaSinkClientV2) Close() error {
 }
 
 // Flush implements SinkClient. Does not retry -- retries will be handled either by kafka or ParallelIO.
-func (k *kafkaSinkClientV2) Flush(ctx context.Context, payload SinkPayload) (retErr error) {
+func (k *kafkaSinkClientV2) Flush(ctx context.Context, payload SinkPayload) error {
 	msgs := payload.([]*kgo.Record)
 
-	var flushMsgs func(msgs []*kgo.Record) error
-	flushMsgs = func(msgs []*kgo.Record) error {
-		if err := k.client.ProduceSync(ctx, msgs...).FirstErr(); err != nil {
-			if k.shouldTryResizing(err, msgs) {
-				a, b := msgs[0:len(msgs)/2], msgs[len(msgs)/2:]
-				// Recurse. This is a little odd because the client's batch
-				// state doesn't consist only of this payload, but the inflight
-				// payloads of all ParallelIO workers. Therefore reducing the
-				// size of this "batch" does not necessarily 1-1 cause a
-				// reduction in the size of the actual batch the client sends.
-				// Still, it should probably help.
-				// Ideally users would set kafka-side max bytes appropriately
-				// with respect to their average message sizes.
-				k.recordResize(int64(len(a)))
-				if err := flushMsgs(a); err != nil {
-					return err
-				}
-				k.recordResize(int64(len(b)))
-				if err := flushMsgs(b); err != nil {
-					return err
-				}
-				return nil
-			} else {
-				if len(msgs) == 1 && errors.Is(err, kerr.MessageTooLarge) && k.includeErrorDetails {
-					msg := msgs[0]
-					mvccVal := msg.Context.Value(mvccTSKey{})
-					var ts hlc.Timestamp
-					if mvccVal != nil {
-						ts = mvccVal.(hlc.Timestamp)
-					}
-					err = errors.Wrapf(err,
-						"Kafka message too large: key=%s size=%d mvcc=%s",
-						string(msg.Key), len(msg.Key)+len(msg.Value), ts,
-					)
-				}
-				return err
-			}
+	// If manual topic creation is enabled, ensure all topics exist before producing.
+	if k.createTopicsManually {
+		if err := k.ensureTopicsExist(ctx, msgs); err != nil {
+			return err
 		}
+	}
+
+	return k.produceWithRetry(ctx, msgs)
+}
+
+// produceWithRetry produces messages, handling MessageTooLarge by splitting the batch.
+func (k *kafkaSinkClientV2) produceWithRetry(ctx context.Context, msgs []*kgo.Record) error {
+	if err := k.client.ProduceSync(ctx, msgs...).FirstErr(); err != nil {
+		if k.shouldTryResizing(err, msgs) {
+			return k.produceInHalves(ctx, msgs)
+		}
+		return k.wrapProduceError(err, msgs)
+	}
+	return nil
+}
+
+// produceInHalves splits the message batch in half and retries each half.
+func (k *kafkaSinkClientV2) produceInHalves(ctx context.Context, msgs []*kgo.Record) error {
+	// Recurse. This is a little odd because the client's batch state doesn't
+	// consist only of this payload, but the inflight payloads of all ParallelIO
+	// workers. Therefore reducing the size of this "batch" does not necessarily
+	// 1-1 cause a reduction in the size of the actual batch the client sends.
+	// Still, it should probably help.
+	// Ideally users would set kafka-side max bytes appropriately with respect
+	// to their average message sizes.
+	a, b := msgs[0:len(msgs)/2], msgs[len(msgs)/2:]
+	k.recordResize(int64(len(a)))
+	if err := k.produceWithRetry(ctx, a); err != nil {
+		return err
+	}
+	k.recordResize(int64(len(b)))
+	return k.produceWithRetry(ctx, b)
+}
+
+// wrapProduceError adds context to produce errors when appropriate.
+func (k *kafkaSinkClientV2) wrapProduceError(err error, msgs []*kgo.Record) error {
+	if len(msgs) == 1 && errors.Is(err, kerr.MessageTooLarge) && k.includeErrorDetails {
+		msg := msgs[0]
+		mvccVal := msg.Context.Value(mvccTSKey{})
+		var ts hlc.Timestamp
+		if mvccVal != nil {
+			ts = mvccVal.(hlc.Timestamp)
+		}
+		return errors.Wrapf(err,
+			"Kafka message too large: key=%s size=%d mvcc=%s",
+			string(msg.Key), len(msg.Key)+len(msg.Value), ts,
+		)
+	}
+	return err
+}
+
+// ensureTopicsExist checks that all topics in the messages exist, creating any
+// that are missing. It uses ListTopics to verify existence rather than relying
+// on produce errors, which provides more precise error handling.
+func (k *kafkaSinkClientV2) ensureTopicsExist(ctx context.Context, msgs []*kgo.Record) error {
+	// Collect unique topics from messages.
+	topicsSet := make(map[string]struct{})
+	for _, msg := range msgs {
+		topicsSet[msg.Topic] = struct{}{}
+	}
+	topics := make([]string, 0, len(topicsSet))
+	for topic := range topicsSet {
+		topics = append(topics, topic)
+	}
+	return k.ensureTopicsExistByName(ctx, topics)
+}
+
+// checkCreateTopicsVersion verifies that all brokers in the cluster support the
+// CreateTopics API at a level required for automatic topic creation (Kafka 2.4.0+).
+func (k *kafkaSinkClientV2) checkCreateTopicsVersion(ctx context.Context) error {
+	// Skip version check if knob is set (for testing).
+	if k.knobs.SkipCreateTopicVersionCheck {
 		return nil
 	}
-	return flushMsgs(msgs)
+
+	apiVersions, err := k.adminClient.ApiVersions(ctx)
+	if err != nil {
+		return errors.Wrap(err, "fetching kafka API versions")
+	}
+
+	// Check that all brokers support CreateTopics at the v2.4.0 level.
+	v24 := kversion.V2_4_0()
+	requiredVersion, ok := v24.LookupMaxKeyVersion(kmsg.CreateTopics.Int16())
+	if !ok {
+		return errors.New("could not determine CreateTopics API version for Kafka 2.4.0")
+	}
+
+	for _, brokerVersions := range apiVersions {
+		if brokerVersions.Err != nil {
+			return errors.Wrapf(brokerVersions.Err, "fetching API versions from broker %d", brokerVersions.NodeID)
+		}
+		brokerMaxVersion, exists := brokerVersions.KeyMaxVersion(kmsg.CreateTopics.Int16())
+		if !exists || brokerMaxVersion < requiredVersion {
+			return errors.Newf(
+				"broker %d does not support CreateTopics API at Kafka 2.4.0 level (broker max: %d, required: %d); "+
+					"automatic topic creation requires Kafka 2.4.0 or later",
+				brokerVersions.NodeID, brokerMaxVersion, requiredVersion)
+		}
+	}
+
+	return nil
+}
+
+// createTopics creates the specified topics in Kafka.
+func (k *kafkaSinkClientV2) createTopics(ctx context.Context, topics []string) error {
+	// Check broker version before attempting to create topics.
+	if err := k.checkCreateTopicsVersion(ctx); err != nil {
+		return err
+	}
+
+	log.Changefeed.Infof(ctx, "creating kafka topics: %+v", topics)
+
+	cresp, err := k.adminClient.CreateTopics(ctx, -1, -1, nil, topics...)
+	if err != nil {
+		return errors.Wrap(err, "creating kafka topics")
+	}
+	for topic, r := range cresp {
+		if r.Err != nil && !errors.Is(r.Err, kerr.TopicAlreadyExists) {
+			return errors.Wrapf(r.Err, "creating kafka topic %s", topic)
+		}
+		if r.Err == nil {
+			log.Changefeed.Infof(ctx, "created topic %s with (numPartitions: %d, replicationFactor: %d)",
+				topic, r.NumPartitions, r.ReplicationFactor)
+		}
+	}
+	return nil
 }
 
 // FlushResolvedPayload implements SinkClient.
@@ -216,9 +309,6 @@ func (k *kafkaSinkClientV2) CheckConnection(ctx context.Context) error {
 func (k *kafkaSinkClientV2) maybeUpdateTopicPartitions(
 	ctx context.Context, forEachTopic func(func(topic string) error) error,
 ) error {
-	k.metadataMu.Lock()
-	defer k.metadataMu.Unlock()
-
 	// Build list of topics.
 	var topics []string
 	if err := forEachTopic(func(topic string) error {
@@ -228,18 +318,98 @@ func (k *kafkaSinkClientV2) maybeUpdateTopicPartitions(
 		return err
 	}
 
-	// If we were asked to update metadata for new topics, always so. Otherwise check the time since last update.
-	const metadataRefreshMinDuration = time.Minute
-	if len(topics) == len(k.metadataMu.allTopicPartitions) && timeutil.Since(k.metadataMu.lastMetadataRefresh) < metadataRefreshMinDuration {
+	// Check if we need to refresh metadata.
+	if !k.needsMetadataRefresh(topics) {
 		return nil
 	}
 
+	// If manual topic creation is enabled, ensure topics exist first.
+	if k.createTopicsManually {
+		if err := k.ensureTopicsExistByName(ctx, topics); err != nil {
+			return err
+		}
+	}
+
+	// Refresh partition metadata.
+	return k.refreshTopicPartitions(ctx, topics)
+}
+
+// needsMetadataRefresh returns true if we should refresh topic partition metadata.
+func (k *kafkaSinkClientV2) needsMetadataRefresh(topics []string) bool {
+	k.metadataMu.Lock()
+	defer k.metadataMu.Unlock()
+
+	const metadataRefreshMinDuration = time.Minute
+	// Refresh if we have new topics or enough time has passed.
+	return len(topics) != len(k.metadataMu.allTopicPartitions) ||
+		timeutil.Since(k.metadataMu.lastMetadataRefresh) >= metadataRefreshMinDuration
+}
+
+// ensureTopicsExistByName checks that the given topics exist, creating any that are missing.
+func (k *kafkaSinkClientV2) ensureTopicsExistByName(ctx context.Context, topics []string) error {
+	// Check which topics need verification (under lock).
+	unverifiedTopics := func() []string {
+		k.metadataMu.Lock()
+		defer k.metadataMu.Unlock()
+		var result []string
+		for _, topic := range topics {
+			if _, verified := k.metadataMu.verifiedTopics[topic]; !verified {
+				result = append(result, topic)
+			}
+		}
+		return result
+	}()
+
+	if len(unverifiedTopics) == 0 {
+		return nil
+	}
+
+	// Check which unverified topics exist.
+	topicDetails, err := k.adminClient.ListTopics(ctx, unverifiedTopics...)
+	if err != nil {
+		return errors.Wrap(err, "listing kafka topics")
+	}
+
+	// Determine which topics are missing.
+	var missingTopics []string
+	for _, topic := range unverifiedTopics {
+		td, ok := topicDetails[topic]
+		if !ok || (td.Err != nil && errors.Is(td.Err, kerr.UnknownTopicOrPartition)) {
+			missingTopics = append(missingTopics, topic)
+		}
+	}
+
+	// Create missing topics.
+	if len(missingTopics) > 0 {
+		if err := k.createTopics(ctx, missingTopics); err != nil {
+			return err
+		}
+	}
+
+	// Mark all topics as verified (under lock).
+	func() {
+		k.metadataMu.Lock()
+		defer k.metadataMu.Unlock()
+		for _, topic := range unverifiedTopics {
+			k.metadataMu.verifiedTopics[topic] = struct{}{}
+		}
+	}()
+
+	return nil
+}
+
+// refreshTopicPartitions fetches and caches partition information for the given topics.
+func (k *kafkaSinkClientV2) refreshTopicPartitions(ctx context.Context, topics []string) error {
 	log.Changefeed.Infof(ctx, `updating kafka metadata for topics: %+v`, topics)
 
 	topicDetails, err := k.adminClient.ListTopics(ctx, topics...)
 	if err != nil {
 		return err
 	}
+
+	k.metadataMu.Lock()
+	defer k.metadataMu.Unlock()
+
 	k.metadataMu.allTopicPartitions = make(map[string][]int32, len(topicDetails.TopicsList()))
 	for _, td := range topicDetails.TopicsList() {
 		k.metadataMu.allTopicPartitions[td.Topic] = td.Partitions
